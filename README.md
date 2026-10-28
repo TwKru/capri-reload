@@ -20,7 +20,7 @@
 
 Доработанная версия Капри: [TwKru/capri-reload](https://github.com/TwKru/capri-reload).
 
-**Оригинальный автор — kyst680.** Исходный проект: [kystt29/capricorn](https://github.com/kystt29/capricorn).
+**Оригинальный автор — kystt29.** Исходный проект: [kystt29/capricorn](https://github.com/kystt29/capricorn).
 Исходная лицензия MIT и уведомление об авторских правах сохранены в [LICENSE](LICENSE).
 
 В этой версии добавлены управление музыкой и громкостью отдельных программ, настройка гаммы монитора,
