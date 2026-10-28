@@ -1,0 +1,11 @@
+{
+  "fps": 60,
+  "inbetweens": 6,
+  "loop": true,
+  "mirror_keys": [
+    4,
+    5,
+    6,
+    7
+  ]
+}

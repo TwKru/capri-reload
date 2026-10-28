@@ -247,6 +247,7 @@ class Capri(QObject):
     quit_app = Signal()
     anim = Signal(str)
     roam = Signal()
+    stop_motion = Signal()
     hop = Signal()
     move_to = Signal(str)
 
@@ -442,6 +443,7 @@ class Capri(QObject):
         self.actions.stop_background()
         self.actions.pending = None
         self.actions.choice = None
+        self.stop_motion.emit()
         if self.listener:
             self.listener.reset_req.set()
         self.subtitle.emit("")
@@ -817,13 +819,12 @@ class Capri(QObject):
             self.hop.emit()  # отвечает, скача по экрану красной молнией
         if reply.action == "wave":
             self.anim.emit("capri")
+        elif reply.action == "anim:spin":
+            self.anim.emit("spin")
         elif reply.action and reply.action.startswith("move:"):
             self.move_to.emit(reply.action[5:])
         elif reply.action == "roam":
-            self.vanish.emit()
-            time.sleep(0.8)
             self.roam.emit()
-            time.sleep(1.5)
         if not streamed and self.say(reply.text):
             return  # перебили — уже слушаем новую команду
 
@@ -928,6 +929,7 @@ def main():
     capri.quit_app.connect(app.quit)
     capri.anim.connect(avatar.play_anim)
     capri.roam.connect(avatar.start_roam)
+    capri.stop_motion.connect(avatar.stop_motion)
     capri.hop.connect(avatar.start_hopping)
     capri.move_to.connect(avatar.move_to_named)
     avatar.clicked.connect(capri.call_from_click)

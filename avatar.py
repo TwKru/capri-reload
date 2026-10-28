@@ -1,6 +1,7 @@
 """Окно-аватар Капри: прозрачное, поверх всех окон, с глитч-эффектами,
 вспышками и «лагами» при появлении, речи и исчезновении."""
 import math
+import json
 import os
 import random
 import time
@@ -45,6 +46,12 @@ def hidpi(src):
                          Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
         src.setDevicePixelRatio(DPR)
     return src
+
+
+def flip_horizontal(image):
+    if hasattr(image, "flipped"):
+        return image.flipped(Qt.Orientation.Horizontal)
+    return image.mirrored(True, False)  # Qt < 6.9
 CM = QPainter.CompositionMode
 
 STATUS_TEXT = {
@@ -387,9 +394,10 @@ class AnimationFrames:
     """PNG декодируются по требованию; в памяти остаётся не более восьми кадров на анимацию."""
     CACHE_SIZE = 8
 
-    def __init__(self, files):
+    def __init__(self, files, mirror_keys=()):
         self.files = tuple(files)
         self.cache = OrderedDict()
+        self.mirror_keys = frozenset(mirror_keys)
 
     def __len__(self):
         return len(self.files)
@@ -402,6 +410,8 @@ class AnimationFrames:
             self.cache.move_to_end(index)
             return self.cache[index]
         src = hidpi(QImage(self.files[index]))
+        if index in self.mirror_keys:
+            src = flip_horizontal(src)
         img = canvas(W, FIG_H)
         p = QPainter(img)
         sw, sh = src.deviceIndependentSize().width(), src.deviceIndependentSize().height()
@@ -414,6 +424,38 @@ class AnimationFrames:
         return img
 
 
+class SmoothAnimationFrames:
+    """Плавные промежуточные кадры считаются при воспроизведении, с ограниченным кэшем."""
+    def __init__(self, keys, steps=6, fps=60):
+        self.keys, self.steps, self.fps = keys, steps, fps
+        self.cache = OrderedDict()
+
+    def __len__(self):
+        return len(self.keys) * self.steps
+
+    def __getitem__(self, index):
+        if not -len(self) <= index < len(self):
+            raise IndexError(index)
+        index %= len(self)
+        key, part = divmod(index, self.steps)
+        if part == 0:
+            return self.keys[key]
+        if index not in self.cache:
+            frame = canvas(W, FIG_H)
+            painter = QPainter(frame)
+            painter.setOpacity(1 - part / self.steps)
+            painter.drawImage(0, 0, self.keys[key])
+            painter.setCompositionMode(CM.CompositionMode_Plus)
+            painter.setOpacity(part / self.steps)
+            painter.drawImage(0, 0, self.keys[(key + 1) % len(self.keys)])
+            painter.end()
+            self.cache[index] = frame
+            if len(self.cache) > 8:
+                self.cache.popitem(last=False)
+        self.cache.move_to_end(index)
+        return self.cache[index]
+
+
 def load_anims(anim_dir):
     """assets/anim/<имя>/*.png → {имя: [кадры размером W×FIG_H]}. Кадры делает tools/convert_anim.py."""
     anims = {}
@@ -422,9 +464,21 @@ def load_anims(anim_dir):
     for name in sorted(os.listdir(anim_dir)):
         folder = os.path.join(anim_dir, name)
         files = sorted(f for f in os.listdir(folder) if f.lower().endswith(".png")) if os.path.isdir(folder) else []
+        try:
+            with open(os.path.join(folder, "motion.json"), encoding="utf-8") as file:
+                motion = json.load(file)
+        except (OSError, ValueError):
+            motion = {}
+        if not isinstance(motion, dict):
+            motion = {}
+        mirrors = motion.get("mirror_keys", [])
         frames = AnimationFrames([os.path.join(folder, f) for f in files
-                                  if QImageReader(os.path.join(folder, f)).canRead()])
+                                  if QImageReader(os.path.join(folder, f)).canRead()],
+                                 mirrors if isinstance(mirrors, list) and all(type(i) is int for i in mirrors) else ())
         if frames:
+            steps, fps = motion.get("inbetweens", 1), motion.get("fps", ANIM_FPS)
+            if type(steps) is int and 1 < steps <= 8 and type(fps) is int and 1 <= fps <= 60:
+                frames = SmoothAnimationFrames(frames, steps, fps)
             anims[name] = frames
     return anims
 
@@ -475,6 +529,8 @@ class Avatar(QWidget):
         self.roam_x = 0.0
         self.roam_dir = -1
         self.roam_last = 0.0
+        self.walk_time = 0.0
+        self.next_spin = time.time() + random.uniform(5, 10)
         self.home_pos = None
 
         self.overlay = LightningOverlay()
@@ -531,18 +587,22 @@ class Avatar(QWidget):
             self.state = "hidden"
             self.roaming = self.hopping = False
             self.tele_target = self.hop_home = None
+            self.anim = None
             self.hide()
 
     def start_roam(self):
         """Прогулка: Капри появляется у одного края экрана и идёт вдоль панели задач к другому."""
-        if self.game_mode or self.roam_img is None or self.state != "hidden":
+        if self.game_mode or (self.roam_img is None and "walk" not in self.anims):
             return
-        self.timer.start(33)
+        self.anim = None
+        self.lag = self.burst = 0
+        self.timer.start(16)
         geo = QGuiApplication.primaryScreen().availableGeometry()
-        self.home_pos = self.pos() if self.user_moved else None
+        self.home_pos = self.pos() if self.user_moved else QPoint(geo.left() + 24, geo.bottom() - H)
         self.roam_dir = random.choice((-1, 1))
         self.roam_x = geo.right() - W if self.roam_dir < 0 else geo.left()
         self.roam_last = time.time()
+        self.walk_time = 0.0
         self.roaming = True
         self.move(int(self.roam_x), geo.bottom() - H)
         self.state, self.k = "appearing", 0
@@ -558,24 +618,26 @@ class Avatar(QWidget):
         self.move(self.home_pos if self.home_pos else self._random_spot())
         self.burst, self.burst_level = 6, 1.0
 
+    def stop_motion(self):
+        self.stop_roam()
+        self.anim = None
+        self.lag = self.burst = 0
+
     def _roam_step(self, now):
         geo = QGuiApplication.primaryScreen().availableGeometry()
         dt = min(0.1, now - self.roam_last)
         self.roam_last = now
-        if self.state != "visible" or self.mode in ("thinking", "speaking") and random.random() < 0.5:
-            return  # пока говорит — идёт вдвое медленнее
+        if self.state != "visible":
+            return
+        self.walk_time += dt
         self.roam_x += self.roam_dir * 70 * dt
-        if random.random() < 0.012:  # глитч-рывок вперёд
-            self.roam_x += self.roam_dir * random.randint(30, 80)
-            self.burst, self.burst_level = random.randint(3, 6), random.uniform(.6, 1.0)
         lo, hi = geo.left() - 40, geo.right() - W + 40
         if not lo <= self.roam_x <= hi:
             if self.mode in ("thinking", "speaking"):
                 self.roam_x = max(lo, min(hi, self.roam_x))  # договорит у края, потом уйдёт
             else:
                 self.vanish()
-        bob = 4 * math.sin(now * 3)
-        self.move(int(self.roam_x), int(geo.bottom() - H + bob))
+        self.move(int(self.roam_x), geo.bottom() - H)
 
     # ---------- телепорт молнией ----------
     def teleport(self, target):
@@ -671,6 +733,7 @@ class Avatar(QWidget):
         if not self.user_moved:
             self.move_to_named("bottom-left")  # появляемся слева снизу, над панелью задач
         self.state, self.k = "appearing", 0
+        self.next_spin = time.time() + (random.uniform(5, 9) if random.random() < .4 else random.uniform(25, 60))
         self.hide_at = 0
         self.show()
         self.raise_()
@@ -680,11 +743,12 @@ class Avatar(QWidget):
             self.state, self.k = "vanishing", 0
 
     def play_anim(self, name, loop=False):
-        if name in self.anims:
+        if name in self.anims and not self.game_mode:
             self.anim, self.anim_start, self.anim_loop = name, time.time(), loop
+            self.lag = self.burst = 0
 
     def set_mode(self, mode, seconds=0.0):
-        if mode == "thinking" and self.mode != "thinking":
+        if mode == "thinking" and self.mode != "thinking" and not self.roaming:
             self.play_anim("eyes", loop=True)
         elif mode != "thinking" and self.anim == "eyes":
             self.anim = None
@@ -700,8 +764,10 @@ class Avatar(QWidget):
 
     # ---------- анимация ----------
     def tick(self):
+        interval = 16 if self.roaming or self.anim in ("spin", "walk") else 33
+        self.timer.setInterval(interval)
         self.t += 1
-        self.k += 1
+        self.k += interval / 33
         now = time.time()
         if self.state == "appearing" and self.k >= APPEAR_FRAMES:
             self.state, self.k = "visible", 0
@@ -729,6 +795,10 @@ class Avatar(QWidget):
             self.render()
             self.update()
             return
+        elif (self.state == "visible" and self.mode == "idle" and self.anim is None and
+              "spin" in self.anims and now >= self.next_spin):
+            self.play_anim("spin")
+            self.next_spin = now + random.uniform(25, 60)
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
               and self.mode != "thinking"):
             self.change_pose()
@@ -736,19 +806,25 @@ class Avatar(QWidget):
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        if self.lag > 0 and self.state != "vanishing":
+        smooth = self.roaming or self.anim in ("spin", "walk")
+        if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
         lag_p = {"appearing": .12, "vanishing": 0}.get(self.state, .05 if self.mode == "speaking" else .015)
-        if random.random() < lag_p:
+        if not smooth and random.random() < lag_p:
             self.lag = random.randint(2, 6)
         self.render()
         self.update()
 
     def _figure(self):
+        if self.roaming and "walk" in self.anims:
+            frames = self.anims["walk"]
+            index = int(self.walk_time * getattr(frames, "fps", ANIM_FPS)) % len(frames)
+            frame = frames[index]
+            return flip_horizontal(frame) if self.roam_dir < 0 else frame
         if self.anim:
             frames = self.anims[self.anim]
-            idx = int((time.time() - self.anim_start) * ANIM_FPS)
+            idx = int((time.time() - self.anim_start) * getattr(frames, "fps", ANIM_FPS))
             if idx < len(frames) or self.anim_loop:
                 return frames[idx % len(frames)]
             self.anim = None
@@ -831,7 +907,7 @@ class Avatar(QWidget):
             glitch = 1.0
             yscale = max(0.03, 1 - prog / 0.55)
             flash = random.random() < 0.3
-        else:
+        elif not (self.roaming or self.anim in ("spin", "walk")):
             if self.burst > 0:
                 self.burst -= 1
                 glitch = self.burst_level
