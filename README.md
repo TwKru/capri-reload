@@ -18,10 +18,9 @@
 
 ## Capri Reload
 
-Доработанная версия Капри: [TwKru/capri-reload](https://github.com/TwKru/capri-reload).
-
-**Оригинальный автор — kystt29.** Исходный проект: [kystt29/capricorn](https://github.com/kystt29/capricorn).
-Исходная лицензия MIT и уведомление об авторских правах сохранены в [LICENSE](LICENSE).
+Разработка и поддержка Capri Reload — **TwKru**.
+Репозиторий: [TwKru/capri-reload](https://github.com/TwKru/capri-reload).
+Лицензия и уведомления об авторских правах — в [LICENSE](LICENSE).
 
 В этой версии добавлены управление музыкой и громкостью отдельных программ, настройка гаммы монитора,
 команды «ночь» и «день», исправления прослушивания и более отзывчивая обработка запросов к ИИ.
