@@ -19,6 +19,7 @@ import psutil
 
 import automation
 import gamma
+import updater
 import media
 from persona import line
 
@@ -974,12 +975,12 @@ FORGET_RE = (r"^(забудь|удали|убери)( мой| мою| из па�
              r"приложени\w*|игр\w*) (?P<name>.+)$")
 
 
-CAPRI_URL = "https://github.com/TwKru/capri-reload"
+CAPRI_URL = updater.PROJECT_URL
 # «есть обновления?», «где скачать новую версию», «твой гитхаб» — страница Капри (не «обнови страницу»)
 UPDATES_RE = (r"^(есть |проверь |проверить |какие |когда |а )?(новые )?обновлени\w*( есть| вышли| для тебя| капри)?$|"
               r"(есть|проверь|проверить|вышл\w*|появил\w*|скачать|где|какие|нет ли)\b.*\bобновлени|"
               r"(что|как)( там| же| у тебя| у нас)? (по|с) обновлени|"
-              r"обнови (себя|капри)|обновись|"
+              r"обнови (себя|капри)|обновись|^(установи|скачай) обновления$|"
               # «новая версия вышла?» — да, «новая версия windows» — нет: только без уточнения или про Капри
               r"^(есть |вышла |появилась |где )?(нов\w*|последн\w*) верси\w*( капри| тебя)?( вышла| есть| появилась)?$|"
               r"(скачать|где) (\S+ )?(нов\w*|последн\w*) верси\w*( капри| тебя)?$|"
@@ -1063,7 +1064,8 @@ class Actions:
              r"^(включи|выключи|отключи|убери|сними) (зацикливание|повтор)"
              r"( (одной|одного|этой|этого|всех|всего))?( песн\w*| песен| трек\w*| плейлиста| списка| очереди)?$",
              self.media_repeat),
-            (r"^(перемешай|перемешивай|перетасуй)( песни| треки| музыку| плейлист| очередь)?$|"
+            (r"^(перемешай|перемешивай|перетасуй)( мои| все| эти| мой| мою)?"
+             r"( песни| треки| музыку| плейлист| очередь)?$|^(shuffle|шаффл|шафл)( песни| музыку| songs)?$|"
              r"^(включи|выключи|отключи|убери) (перемешивание|случайный порядок|шаффл)$|"
              r"^(играй|включи музыку) (в случайном порядке|вперемешку)$", self.media_shuffle),
             (r"что (сейчас )?(играет|звучит|за (песн|трек|музык|видео)\w*)", self.media_info),
@@ -1135,6 +1137,12 @@ class Actions:
         c = norm(cmd)
         if len(c.split()) > 10:
             return False
+        if re.fullmatch(r"обновись|обнови (себя|капри)|проверь обновления|установи обновления|скачай обновления", c):
+            return True
+        if re.fullmatch(r"(перемешай|перемешивай|перетасуй)( мои| все| эти| мой| мою)?"
+                        r"( песни| треки| музыку| плейлист| очередь)?|shuffle|шаффл|шафл|"
+                        r"(включи|выключи|отключи) перемешивание", c):
+            return True
         if re.fullmatch(GAMMA_VALUE_RE, c):
             return True
         if re.fullmatch(r"ночь|день|включи ночь|выключи ночь|верни гамму|сбрось гамму|гамма на максимум|"
@@ -1155,6 +1163,52 @@ class Actions:
             return True
         m = re.fullmatch(r"открой (.+)", c)
         return bool(m and m.group(1) in self.sites)
+
+    def execute_decision(self, decision, original=None):
+        """Только перечисленные действия. Названия и поисковый текст не разбираются как цепочки команд."""
+        if decision.action == "chat":
+            return None
+        if original and decision.action in ("mute", "unmute") and decision.target:
+            if not self._audio_target_mentioned(decision.target, original):
+                return Reply("Уточни, в какой программе изменить звук.")
+        if original and decision.action == "gamma":
+            match = re.search(r"\bгамм[ау](?:\s+(?:монитора|экрана))?\s+(?:(?:на|до)\s+)?(.+)$", norm(original))
+            try:
+                value = parse_gamma_value(match.group(1).removesuffix(" пожалуйста")) if match else None
+            except ValueError:
+                value = None
+            if value is None:
+                return Reply("Назови точное значение гаммы, например два с половиной.")
+            command = f"гамма {value:g}"
+            return self.gamma_value(command, re.fullmatch(GAMMA_VALUE_RE, command))
+        if original and decision.action == "volume":
+            # Числа берём из запроса, даже если маленькая модель неверно извлекла параметр.
+            target, operation = self._volume_request(norm(original))
+            target = decision.target or target
+            if target and not self._audio_target_mentioned(target, original):
+                return Reply("Уточни, в какой программе изменить громкость.")
+            number = parse_number(operation)
+            if number is not None or re.search(r"громче|тише", operation):
+                return self.volume(operation + (" в " + target if target else ""), None)
+        try:
+            command = decision.command()
+        except ValueError:
+            return Reply("Не поняла параметры команды. Назови программу и значение ещё раз.")
+        handlers = {"music": self.music, "pause": self.media_pause, "resume": self.media_play,
+                    "next": self.media_next, "prev": self.media_prev, "shuffle_on": self.media_shuffle,
+                    "shuffle_off": self.media_shuffle, "repeat_track": self.media_repeat,
+                    "repeat_list": self.media_repeat, "repeat_off": self.media_repeat,
+                    "volume": self.volume, "mute": self.volume, "unmute": self.volume,
+                    "hide": self.hide, "wave": self.wave}
+        if decision.action in handlers:
+            return handlers[decision.action](command, None)
+        if decision.action == "gamma":
+            return self.gamma_value(command, re.fullmatch(GAMMA_VALUE_RE, command))
+        if decision.action == "open":
+            return self.open(command, re.fullmatch(r"открой (?P<t>.+)", command))
+        if decision.action == "search":
+            return self.search(command, re.fullmatch(r"найди (?P<q>.+)", command))
+        return None
 
     def handle(self, cmd):
         c = norm(cmd)
@@ -1330,9 +1384,20 @@ class Actions:
         return Reply(line("remember_fail", e=err) if err else line("forget_ok", t=name))
 
     def updates(self, c, m):
-        """Страница Капри на GitHub — там новые версии."""
-        self.web(CAPRI_URL)
-        return Reply(line("updates"))
+        if re.search(r"\bобновись\b|обнови (себя|капри)|^(установи|скачай) обновления$", c):
+            return Reply("Проверю и скачаю обновление из capri-reload. Личные настройки сохраню, после установки перезапущусь.",
+                         "update")
+        if re.search(r"гитхаб|github|где скачать|страниц", c):
+            self.web(CAPRI_URL)
+            return Reply("Открываю Capri Reload на твоём GitHub.")
+        try:
+            latest = updater.latest_version()
+            if latest == updater.installed_version(self.base_dir):
+                return Reply("Установлена последняя версия Capri Reload.")
+            return Reply(f"На GitHub доступна версия {latest[:7]}. Для установки скажи: Капри, обновись.")
+        except Exception as error:
+            log.info("Не удалось проверить обновления: %s", error)
+            return Reply("Не смогла проверить обновления. Попробуй позже или открой мой GitHub.")
 
     def reply_cmd(self, c, m):
         """«Когда я скажу „как дела“, отвечай „лучше всех“» — свой ответ на фразу."""
@@ -1731,6 +1796,8 @@ class Actions:
 
     def volume(self, c, m):
         target, operation = self._volume_request(c)
+        if target.lower() == "browser":
+            target = "браузер"
         browser_names = [key for pattern, key in BROWSER_WORDS
                          if re.fullmatch(r"(?:браузер\w*\s+)?(?:" + pattern + r")(?:\s+браузер\w*)?", target)]
         browser_target = browser_names or re.fullmatch(r"браузер\w*", target)
@@ -1755,7 +1822,8 @@ class Actions:
         if target:
             volumes = self._program_volumes(target)
             if not volumes:
-                return Reply(f"Не нашла звуковую сессию «{target}». Включи звук в этой программе и повтори команду.")
+                return Reply(f"Не нашла звуковую сессию «{target}». Включи звук в этой программе и повтори команду.",
+                             "unresolved")
             replies = [self._change_volume(operation, lambda v=v: round(v.GetMasterVolume() * 100),
                                          lambda n, v=v: self._set_session_volume(v, n),
                                          lambda on, v=v: v.SetMute(on, None)) for v in volumes]
@@ -1768,6 +1836,9 @@ class Actions:
         target = re.sub(r"^(сделай|поставь|установи|выставь|измени|поменяй|убавь|прибавь|уменьши|увеличь|"
                         r"понизь|повысь|выключи|включи|отключи|убери|верни|замуть)\s+", "", c)
         target = re.sub(r"\b(громкость|звук|погромче|потише|громче|тише|без звука)\b", " ", target)
+        target = re.sub(r"\s+", " ", target).strip()
+        target = re.sub(r"\b(можешь|пожалуйста|немного|немножко|немножечко|чуть|чуток|мне|сделать|сделай|"
+                        r"поставить|поставь|давай)\b", " ", target)
         target = re.sub(r"\s+", " ", target).strip()
         numbers = r"(?:\d{1,3}|" + "|".join(NUM) + r"|максимум|минимум|половину|половина|полную|всю)"
         amount = rf"{numbers}(?:\s+{numbers})*(?:\s+процент\w*)?"
@@ -1802,6 +1873,21 @@ class Actions:
         # Частые русские падежи: «дискорда», «в дискорде», «телеграму».
         return " ".join(re.sub(r"(ами|ями|ого|ому|ом|ем|ах|ях|а|я|у|ю|е|ы|и)$", "", word)
                         if re.fullmatch(r"[а-я]{4,}", word) else word for word in words)
+
+    def _audio_target_mentioned(self, target, original):
+        keys = {self._audio_name(target), self._audio_name(translit(target))}
+        for alias, name in {**AUDIO_ALIASES, **self.aliases}.items():
+            if self._audio_name(name) in keys:
+                keys.add(self._audio_name(alias))
+        if target.lower() == "browser":
+            keys.add("браузер")
+        for pattern, name in BROWSER_WORDS:
+            if self._audio_name(name) in keys and re.search(r"\b(?:" + pattern + r")\b", norm(original)):
+                return True
+        for text in (self._audio_name(original), self._audio_name(translit(original))):
+            if any(key and re.search(r"(^|\s)" + re.escape(key) + r"(\s|$)", text) for key in keys):
+                return True
+        return False
 
     def _program_volumes(self, target):
         from pycaw.pycaw import AudioUtilities

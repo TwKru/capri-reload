@@ -7,12 +7,13 @@ from unittest.mock import Mock, patch
 
 import main
 from actions import Reply
+from intent_router import Decision
 
 
 class ListeningTests(unittest.TestCase):
     def setUp(self):
         cfg = copy.deepcopy(main.DEFAULTS)
-        cfg.update(local_ai=False, use_google_stt=False)
+        cfg.update(local_ai=False, use_google_stt=False, intent_router=False)
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), \
                 patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             self.capri = main.Capri(cfg)
@@ -152,6 +153,96 @@ class ListeningTests(unittest.TestCase):
             release.set()
             self.assertTrue(finished.wait(1))
             worker.join(1)
+        self.assertEqual(self.capri.local.history, [])
+
+    def test_streamed_sentences_speak_before_completion_without_repeating(self):
+        first_spoken = threading.Event()
+        completed = threading.Event()
+        class StreamAI(main.LocalAI):
+            def __init__(self):
+                self.history = []
+            def ask(self, question, on_sentence=None):
+                on_sentence("Первая фраза.")
+                if not first_spoken.wait(1):
+                    raise RuntimeError("Первая фраза не озвучена во время генерации")
+                on_sentence("Вторая фраза.")
+                answer = "Первая фраза. Вторая фраза."
+                self.history.append({"role": "assistant", "content": answer})
+                completed.set()
+                return answer
+        self.capri.local = StreamAI()
+        self.capri.actions.handle.return_value = None
+        def say(text):
+            if text == "Первая фраза.":
+                self.assertFalse(completed.is_set())
+                first_spoken.set()
+            return False
+        self.capri.say = Mock(side_effect=say)
+        self.capri.on_final("капри расскажи что-нибудь", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual([c.args[0] for c in self.capri.say.call_args_list],
+                         ["Первая фраза.", "Вторая фраза."])
+        self.capri.speaker.prepare.assert_called_once_with("Вторая фраза.")
+        self.assertTrue(completed.is_set())
+
+    def test_router_command_bypasses_big_model_even_when_it_is_busy(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("next")
+        self.capri.actions.handle.return_value = None
+        self.capri.actions.execute_decision.return_value = Reply("Следующая песня.")
+        self.capri.local = Mock()
+        self.capri.say = Mock(return_value=False)
+        self.capri.on_final("капри давай другую песню", b"audio")
+        self.capri.ai_call_lock.acquire()
+        worker = threading.Thread(target=self.capri._process, args=(self.capri.jobs.get_nowait(),), daemon=True)
+        try:
+            worker.start()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+        finally:
+            self.capri.ai_call_lock.release()
+            worker.join(1)
+        self.capri.actions.execute_decision.assert_called_once_with(Decision("next"), original="давай другую песню")
+        self.capri.local.ask.assert_not_called()
+
+    def test_known_command_does_not_call_router(self):
+        self.capri.router = Mock()
+        self.capri.on_final("капри открой ютуб", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.router.ask.assert_not_called()
+
+    def test_update_starts_helper_once_after_spoken_reply(self):
+        self.capri.actions.handle.return_value = Reply("Обновляюсь.", "update")
+        self.capri.say = Mock(return_value=False)
+        process = Mock()
+        process.poll.return_value = None
+        with patch("main.updater.start_update", return_value=process) as start:
+            for _ in range(2):
+                self.capri.text_command("обновись")
+                self.capri._process(self.capri.jobs.get_nowait())
+            start.assert_called_once()
+
+    def test_stop_during_stream_drops_remaining_sentences_and_history(self):
+        completed = threading.Event()
+        class StreamAI(main.LocalAI):
+            def __init__(self):
+                self.history = []
+            def ask(self, question, on_sentence=None):
+                on_sentence("Первая фраза.")
+                on_sentence("Вторая фраза.")
+                self.history.append({"role": "assistant", "content": "Запоздалый ответ"})
+                completed.set()
+                return "Первая фраза. Вторая фраза."
+        self.capri.local = StreamAI()
+        self.capri.actions.handle.return_value = None
+        def stop(text):
+            self.capri.stop_listening()
+            return True
+        self.capri.say = Mock(side_effect=stop)
+        self.capri.on_final("капри расскажи что-нибудь", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertTrue(completed.wait(1))
+        self.capri.say.assert_called_once_with("Первая фраза.")
         self.assertEqual(self.capri.local.history, [])
 
     def test_stop_interrupts_speech_even_with_barge_in_disabled(self):

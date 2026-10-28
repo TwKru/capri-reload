@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import updater
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -43,6 +44,7 @@ try:
     from actions import CAPRI_URL, Actions, Reply
     from ai import AI
     from local_ai import LocalAI
+    from intent_router import IntentRouter
     from persona import LINES, gendered, line, set_user
     from avatar import Avatar
     import zapret
@@ -60,6 +62,10 @@ DEFAULTS = {
     "local_model": "qwen3:8b",
     "local_keep_alive": "30m",
     "local_timeout_seconds": 15,
+    "intent_router": True,
+    "router_model": "qwen3:0.6b",
+    "router_timeout_seconds": 2.5,
+    "router_num_gpu": 0,
     "barge_in": True,
     "mic_device": None,
     "chatter": True,
@@ -83,6 +89,7 @@ DEFAULTS = {
     "use_google_stt": True,
     "voice": "ru-RU-SvetlanaNeural",
     "tts_engine": "edge",
+    "tts_timeout_seconds": 4,
     "voice_rate": "+10%",
     "voice_pitch": "+15Hz",
     "voice_shift": 0,
@@ -268,6 +275,7 @@ class Capri(QObject):
                                   re.IGNORECASE)
         self.ai = AI(cfg)
         self.local = LocalAI(cfg) if cfg.get("local_ai") else None
+        self.router = IntentRouter(cfg) if cfg.get("intent_router", True) else None
         if self.local:
             self.local.on_model_change = self._remember_model
         self.actions = Actions(cfg, BASE, self.ai, save=save_entry)
@@ -280,6 +288,8 @@ class Capri(QObject):
         self.voice_generation = 0  # «стоп» отменяет голосовые задания, которые ещё обрабатываются
         self.command_serial = 0
         self.ai_call_lock = threading.Lock()
+        self.router_call_lock = threading.Lock()
+        self.update_process = None
         self.last_partial_wake = 0.0
         self.speaking = False
         self.interrupted = False
@@ -298,6 +308,8 @@ class Capri(QObject):
         threading.Thread(target=self._worker, daemon=True).start()
         if self.local:
             threading.Thread(target=self.local.start_server, daemon=True).start()
+        if self.router:
+            threading.Thread(target=self.router.warmup, daemon=True).start()
         model =os.path.join(BASE, self.cfg["vosk_model"])
         if os.path.isdir(model):
             self.listener = Listener(model, self.on_final, self.on_partial, self.on_listener_error,
@@ -612,36 +624,62 @@ class Capri(QObject):
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
 
-    def _ask_ai(self, ai, question, cancelled):
+    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
-        while not self.ai_call_lock.acquire(blocking=False):
+        call_lock = lock if lock is not None else self.ai_call_lock
+        while not call_lock.acquire(blocking=False):
             if cancelled():
                 return AI_CANCELLED
             time.sleep(0.05)
         if cancelled():
-            self.ai_call_lock.release()
+            call_lock.release()
             return AI_CANCELLED
         # Отменённый запрос не должен позже дописать ответ в историю разговора.
-        working = copy.copy(ai)
+        working = ai if isinstance(ai, IntentRouter) else copy.copy(ai)
         history = getattr(ai, "history", None)
         if isinstance(history, list):
             working.history = copy.deepcopy(history)
         ready = threading.Event()
         result = [None]
+        sentences = queue.Queue()
+        received = 0
+
+        def sentence(text):
+            nonlocal received
+            if cancelled():
+                return
+            # Первое предложение нужно сразу; следующие готовим, пока звучит предыдущее.
+            if received:
+                self.speaker.prepare(text)
+            received += 1
+            sentences.put(text)
 
         def ask():
             try:
-                result[0] = working.ask(question)
+                if on_sentence and isinstance(working, LocalAI):
+                    result[0] = working.ask(question, on_sentence=sentence)
+                else:
+                    result[0] = working.ask(question)
             except Exception:
                 log.exception("Ошибка запроса к ИИ")
             finally:
-                self.ai_call_lock.release()
+                call_lock.release()
                 ready.set()
 
         threading.Thread(target=ask, daemon=True).start()
-        while not ready.wait(0.05):
+        while True:
             if cancelled():
                 log.info("Ожидание ИИ отменено: новая команда или стоп")
+                return AI_CANCELLED
+            try:
+                text = sentences.get(timeout=0.05)
+            except queue.Empty:
+                if ready.is_set():
+                    break
+                continue
+            if cancelled():
+                return AI_CANCELLED
+            if on_sentence and on_sentence(text):
                 return AI_CANCELLED
         if cancelled():
             return AI_CANCELLED
@@ -651,6 +689,7 @@ class Capri(QObject):
 
     def _process(self, job):
         kind = job[0]
+        streamed = False
         generation = job[4] if kind == "voice" else None
         serial = self.command_serial
 
@@ -721,23 +760,44 @@ class Capri(QObject):
         reply = self.actions.handle(cmd)
         if cancelled():
             return
+        if self.router and (reply is None or reply.action == "unresolved"):
+            decision = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
+                                    lock=self.router_call_lock)
+            if decision is AI_CANCELLED:
+                return
+            if decision is not None and decision.action != "chat":
+                routed = self.actions.execute_decision(decision, original=cmd)
+                if routed is not None:
+                    reply = routed
+            elif decision is not None and reply is not None and IntentRouter.is_question(cmd):
+                reply = None
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
         if reply is None:
             ai_cancelled = lambda: cancelled() or serial != self.command_serial
+
+            def speak_sentence(text):
+                nonlocal streamed
+                if not streamed and self.cfg.get("teleport_on_answer"):
+                    self.hop.emit()
+                streamed = True
+                return self.say(text)
+
             if self.cfg.get("enable_ai") and self.ai.available:
                 answer = self._ask_ai(self.ai, cmd, ai_cancelled)
                 if answer is AI_CANCELLED:
                     return
                 reply = Reply(answer or "Не удалось получить ответ нейросети. Попробуй ещё раз.", "answer")
             else:
-                answer = self._ask_ai(self.local, cmd, ai_cancelled) if self.local else None
+                answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence) if self.local else None
                 if answer is AI_CANCELLED or cancelled():
                     return
                 reply = Reply(answer, "answer") if answer else self.actions.fallback(cmd, force_search=bool(self.local))
         if cancelled():
             return
-        if reply.action == "answer" and self.cfg.get("teleport_on_answer"):
+        if streamed:
+            self.subtitle.emit(reply.text)
+        if reply.action == "answer" and not streamed and self.cfg.get("teleport_on_answer"):
             self.hop.emit()  # отвечает, скача по экрану красной молнией
         if reply.action == "wave":
             self.anim.emit("capri")
@@ -748,11 +808,16 @@ class Capri(QObject):
             time.sleep(0.8)
             self.roam.emit()
             time.sleep(1.5)
-        if self.say(reply.text):
+        if not streamed and self.say(reply.text):
             return  # перебили — уже слушаем новую команду
 
         if reply.action == "quit":
             self.quit_app.emit()
+        elif reply.action == "update":
+            if self.update_process is None or self.update_process.poll() is not None:
+                self.update_process = updater.start_update(BASE, os.getpid())
+            self.subtitle.emit("Обновляюсь из TwKru/capri-reload…")
+            self.mode.emit("idle", 0.0)
         elif reply.action == "hide":
             self.vanish.emit()
         else:
@@ -882,7 +947,9 @@ def main():
                       ("MIC", None),
                       ("SEARCH", None),
                       ("Открыть config.json", lambda: os.startfile(CONFIG_PATH)),
-                      ("Капри на GitHub (обновления)…", lambda: capri.actions.web(CAPRI_URL)),
+                      ("Проверить обновления Capri Reload", lambda: capri.text_command("проверь обновления")),
+                      ("Обновить Capri Reload", lambda: capri.text_command("обновись")),
+                      ("Капри на GitHub…", lambda: capri.actions.web(CAPRI_URL)),
                       (None, None),
                       ("Выход", app.quit)):
         if title is None:

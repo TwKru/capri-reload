@@ -153,6 +153,9 @@ def main():
         return 1
     if save_model(model):
         say(f"\n[Capri] Готово! Модель {model} прописана в config.json.")
+    say("[Capri] Скачиваю маленькую модель-диспетчер qwen3:0.6b (~523 МБ)...")
+    if subprocess.run([exe, "pull", "qwen3:0.6b"]).returncode != 0:
+        say("[Capri] Диспетчер пока не скачался. Капри будет работать без него; повтори setup_ai.bat позже.")
     say("[Capri] Перезапусти Капри (значок в трее -> «Выход», затем run.bat) — и можно болтать.")
     return 0
 

@@ -12,5 +12,9 @@ samples/
 # служебное
 __pycache__/
 .ruff_cache/
+.capri-version
+.capri-update-backup/
+.capri-update.lock
+capri-update.log
 *.pyc
 *.tmp

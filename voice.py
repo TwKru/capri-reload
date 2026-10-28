@@ -498,6 +498,9 @@ class Speaker:
         self.stop_event = threading.Event()
         self.volume = int(cfg.get("voice_volume", 100))  # громкость Капри 0..100, общая громкость Windows не меняется
         self.edge_error = None  # почему не сработал голос Microsoft в последний раз (None — сработал)
+        self.tts_timeout = max(1.0, float(cfg.get("tts_timeout_seconds", 4)))
+        self._edge_retry_at = 0.0
+        self._edge_failures = 0
         if self.engine == "silero":  # прогреваем модель заранее, чтобы первая фраза не тормозила
             threading.Thread(target=self._warmup, daemon=True).start()
 
@@ -517,17 +520,51 @@ class Speaker:
         text = clean_for_speech(text)
         if not text:
             return False
-        try:
-            interrupted = self._edge(text)
-            self.edge_error = None
-            return interrupted
-        except Exception as e:
-            self.edge_error = str(e)
-            log.info("edge-tts недоступен (%s), использую голос Windows", e)
+        cached = os.path.isfile(self._cache_path(text))
+        if cached or time.monotonic() >= self._edge_retry_at:
+            try:
+                interrupted = self._edge(text)
+                if not cached:
+                    self.edge_error = None
+                    self._edge_failures = 0
+                    self._edge_retry_at = 0.0
+                return interrupted
+            except Exception as e:
+                self._edge_failed(e)
+        if self.stop_event.is_set():
+            return True
         try:
             return self._sapi(text)
         except Exception:
             log.exception("SAPI тоже не сработал")
+            return False
+
+    def _edge_failed(self, error):
+        self.edge_error = str(error) or type(error).__name__
+        self._edge_failures = min(4, self._edge_failures + 1)
+        delay = min(300, 60 * 2 ** (self._edge_failures - 1))
+        self._edge_retry_at = time.monotonic() + delay
+        log.info("Синтез голоса недоступен (%s), голос Windows; следующая попытка через %s с",
+                 self.edge_error, delay)
+
+    def prepare(self, text):
+        """Подготовить короткую следующую фразу в фоне, не включая звук."""
+        text = clean_for_speech(text)
+        if not text or len(text) > CACHE_MAX_TEXT:
+            return False
+        if os.path.isfile(self._cache_path(text)):
+            return True
+        if time.monotonic() < self._edge_retry_at:
+            return False
+        try:
+            with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
+                self.cached_render(text, os.path.join(folder, "voice.wav"))
+            self.edge_error = None
+            self._edge_failures = 0
+            self._edge_retry_at = 0.0
+            return os.path.isfile(self._cache_path(text))
+        except Exception as error:
+            self._edge_failed(error)
             return False
 
     def render_silero(self, text, dst):
@@ -569,8 +606,9 @@ class Speaker:
         parts = [f"{base}_{i}.mp3" for i in range(len(sentences))]
 
         async def go():  # фразы синтезируются параллельно — задержка как у одной
-            await asyncio.gather(*(edge_tts.Communicate(s, self.voice, rate=r, pitch=self.pitch).save(f)
-                                   for s, r, f in zip(sentences, rates, parts)))
+            await asyncio.wait_for(asyncio.gather(
+                *(edge_tts.Communicate(s, self.voice, rate=r, pitch=self.pitch).save(f)
+                  for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout)
         asyncio.run(go())
         try:
             import numpy as np
@@ -588,7 +626,10 @@ class Speaker:
             if len(parts) == 1:
                 return parts[0]
             fallback = base + ".mp3"
-            asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch).save(fallback))
+            async def fallback_audio():
+                await asyncio.wait_for(edge_tts.Communicate(text, self.voice, rate=self.rate,
+                                                           pitch=self.pitch).save(fallback), timeout=self.tts_timeout)
+            asyncio.run(fallback_audio())
             return fallback
 
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------
@@ -628,11 +669,8 @@ class Speaker:
             text = clean_for_speech(text)
             if not text or os.path.isfile(self._cache_path(text)):
                 continue
-            try:
-                with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
-                    self.cached_render(text, os.path.join(folder, "voice.wav"))
-            except Exception as e:
-                log.info("Предзагрузка фраз остановлена: %s", e)
+            if not self.prepare(text):
+                log.info("Предзагрузка фраз приостановлена")
                 return
             time.sleep(0.5)
         log.info("Постоянные фразы озвучены заранее")

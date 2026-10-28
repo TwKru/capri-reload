@@ -155,6 +155,7 @@ class LocalAI:
         self.model = cfg.get("local_model", "qwen3:8b")
         self.keep_alive = cfg.get("local_keep_alive", "30m")
         self.timeout = max(1.0, float(cfg.get("local_timeout_seconds", 15)))
+        self.router_model = cfg.get("router_model", "qwen3:0.6b")
         self.history = []
         self.on_model_change = None  # main записывает новую модель в config.json
 
@@ -191,7 +192,7 @@ class LocalAI:
                 log.info("Ollama не отвечает")
                 return
         if not has_model(names, self.model):
-            other = pick_model(names)
+            other = pick_model([name for name in names if not has_model([name], self.router_model)])
             if not other:
                 log.info("В Ollama нет ни одной модели — запусти setup_ai.bat или: ollama pull %s", self.model)
                 return
@@ -223,7 +224,44 @@ class LocalAI:
             return self._chat(messages + [{"role": "system", "content": NO_THINKING}], max_tokens)
         return text
 
-    def ask(self, question):
+    def _chat_stream(self, messages, on_sentence):
+        """Отдавать законченные предложения, пока Ollama дописывает остальной ответ."""
+        payload = {"model": self.model, "messages": messages, "stream": True, "think": False,
+                   "keep_alive": self.keep_alive,
+                   "options": {"num_predict": 300, "temperature": 0.6, "repeat_penalty": 1.15}}
+        req = urllib.request.Request(URL + "/api/chat", data=json.dumps(payload).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        raw, emitted = "", 0
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            for line in response:
+                if not line.strip():
+                    continue
+                chunk = json.loads(line)
+                if chunk.get("error"):
+                    raise RuntimeError(chunk["error"])
+                raw += chunk.get("message", {}).get("content", "")
+                text = strip_reasoning(raw)
+                if REASONING.search(text):
+                    continue
+                parts = re.split(r"(?<=[.!?…])\s+", text)
+                complete = len(parts) if chunk.get("done") else len(parts) - 1
+                while emitted < complete:
+                    on_sentence(parts[emitted])
+                    emitted += 1
+                if chunk.get("done"):
+                    break
+        return strip_reasoning(raw)
+
+    @staticmethod
+    def _clean_answer(answer, question, history):
+        recent = [m["content"] for m in history if m["role"] == "assistant"]
+        answer = naturalize(drop_repeats(drop_third_person(answer), history), question, recent)
+        answer = re.sub(r"\s*\([^)]*\)", "", answer)
+        answer = re.sub(r"[\U0001F000-\U0001FAFF☀-➿️]", "", answer)
+        answer = re.sub(r"\s+", " ", FOREIGN.sub("", answer)).strip()
+        return answer[:1].upper() + answer[1:]
+
+    def ask(self, question, on_sentence=None):
         """Текст ответа или None, если лучше открыть поиск."""
         if FRESH.search(question.lower()):
             return None
@@ -231,26 +269,38 @@ class LocalAI:
         self.history.append({"role": "user", "content": question})
         self.history = self.history[-6:]
         messages = [{"role": "system", "content": SYSTEM + "\n" + user_context() + f"\nСейчас {now}."}] + self.history
+        spoken = []
+
+        def emit(sentence):
+            history = self.history + [{"role": "assistant", "content": s} for s in spoken]
+            text = self._clean_answer(sentence, question, history)
+            broken = len(text) < 40 and not re.search(r"[.!?…]$", text)
+            if not text or broken or REASONING.search(text) or SEARCH_MARK in text.upper()[:20]:
+                return
+            on_sentence(text)
+            spoken.append(text)
+
         try:
-            answer = self._chat(messages)
-            if FOREIGN.search(answer):  # Qwen иногда срывается на китайский — пробуем ещё раз
+            answer = self._chat_stream(messages, emit) if on_sentence else self._chat(messages)
+            if on_sentence and not spoken and REASONING.search(answer):
+                answer = self._chat(messages + [{"role": "system", "content": NO_THINKING}])
+            if FOREIGN.search(answer) and not spoken:  # повторять уже озвученные предложения нельзя
                 answer = self._chat(messages + [{"role": "system", "content":
                                     "Ответь заново, строго только русскими буквами, без иероглифов."}])
             answer = re.sub(r"\s+", " ", FOREIGN.sub("", answer)).strip()
         except Exception as e:
             log.info("Локальная модель недоступна: %s", e)
-            self.history.pop()
-            return None
-        recent = [m["content"] for m in self.history if m["role"] == "assistant"]
-        answer = naturalize(drop_repeats(drop_third_person(answer), self.history), question, recent)
-        answer = re.sub(r"\s*\([^)]*\)", "", answer)                      # ремарки в скобках
-        answer = re.sub(r"[\U0001F000-\U0001FAFF☀-➿️]", "", answer)  # эмодзи
-        answer = re.sub(r"\s+", " ", answer).strip()
-        answer = answer[:1].upper() + answer[1:]
+            if not spoken:
+                self.history.pop()
+                return None
+            answer = " ".join(spoken)
+        answer = " ".join(spoken) if spoken else self._clean_answer(answer, question, self.history)
         broken = len(answer) < 40 and not re.search(r"[.!?…]$", answer)
         if not answer or broken or SEARCH_MARK in answer.upper()[:20]:
             self.history.pop()
             return None
+        if on_sentence and not spoken:
+            on_sentence(answer)
         self.history.append({"role": "assistant", "content": answer})
         return answer
 

@@ -110,6 +110,13 @@ class CommandTests(unittest.TestCase):
 
 
 class LocalPerformanceTests(unittest.TestCase):
+    def test_dispatcher_model_is_not_selected_as_chat_fallback(self):
+        ai = LocalAI({})
+        with patch.object(ai, "installed", return_value=["qwen3:0.6b"]), patch("local_ai._post") as post:
+            ai.start_server()
+        self.assertEqual(ai.model, "qwen3:8b")
+        post.assert_not_called()
+
     def test_keep_alive_applies_to_warmup_and_chat(self):
         for cfg, expected in (({}, "30m"), ({"local_keep_alive": "15m"}, "15m")):
             with self.subTest(cfg=cfg):
