@@ -28,7 +28,6 @@ def bg_candidates(rgb, kind):
 def key_frame(rgb, kind):
     h, w, _ = rgb.shape
     cand = Image.fromarray(np.where(bg_candidates(rgb, kind), 255, 0).astype(np.uint8))
-    draw = ImageDraw.Draw(cand)
     step = 8
     border = ([(x, 0) for x in range(0, w, step)] + [(x, h - 1) for x in range(0, w, step)] +
               [(0, y) for y in range(0, h, step)] + [(w - 1, y) for y in range(0, h, step)])

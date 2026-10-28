@@ -153,6 +153,8 @@ def pick_model(names):
 class LocalAI:
     def __init__(self, cfg):
         self.model = cfg.get("local_model", "qwen3:8b")
+        self.keep_alive = cfg.get("local_keep_alive", "30m")
+        self.timeout = max(1.0, float(cfg.get("local_timeout_seconds", 15)))
         self.history = []
         self.on_model_change = None  # main записывает новую модель в config.json
 
@@ -198,7 +200,7 @@ class LocalAI:
             if self.on_model_change:
                 self.on_model_change(other)
         try:
-            _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": "10m"}, 120)
+            _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": self.keep_alive}, 120)
             log.info("Локальная модель %s загружена", self.model)
         except Exception as e:
             log.info("Не удалось прогреть модель: %s", e)
@@ -209,9 +211,9 @@ class LocalAI:
             "messages": messages,
             "stream": False,
             "think": False,  # Qwen3 по умолчанию «рассуждает» вслух — для голоса это лишняя задержка
-            "keep_alive": "10m",
+            "keep_alive": self.keep_alive,
             "options": {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15},
-        }, 120)
+        }, self.timeout)
         text = strip_reasoning(resp.get("message", {}).get("content", ""))
         if REASONING.search(text):
             # модель всё равно «думает» вслух — переспрашиваем, а если опять, ответа нет

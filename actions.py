@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import psutil
 
 import automation
+import gamma
 import media
 from persona import line
 
@@ -73,6 +74,57 @@ def parse_number(text):
     if re.search(r"минимум", text):
         return 0
     return None
+
+
+GAMMA_VALUE_RE = (r"^(?:(?:поставь|установи|сделай|выставь|измени|поменяй)\s+)?гамм[ау]"
+                  r"(?:\s+(?:монитора|экрана))?\s+(?:(?:на|до)\s+)?(?P<value>.+)$")
+
+
+def parse_gamma_value(text):
+    """Число для гаммы: 2.5, 2 5 (запятая после norm), два с половиной, две целых пять десятых."""
+    text = text.strip().lower().replace("ё", "е").replace(",", ".")
+    if text == "максимум":
+        return gamma.MAX_GAMMA
+    if text == "минимум":
+        return gamma.MIN_GAMMA
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return float(text)
+    if re.fullmatch(r"\d+\s+\d+", text):
+        return float(".".join(text.split()))
+
+    def integer(part):
+        part = part.strip()
+        part = {"одну": "одна", "одной": "одна"}.get(part, part)
+        if part.isdigit():
+            return int(part)
+        words = part.split()
+        if words and all(word in NUM for word in words):
+            return parse_number(part)
+        raise ValueError("Назови число, например два с половиной")
+
+    if text in ("полтора", "полторы"):
+        return 1.5
+    if text.endswith(" с половиной"):
+        return integer(text.removesuffix(" с половиной")) + 0.5
+    parts = re.split(r"\s+(?:целая|целую|целых|целое|точка|запятая|и)\s+", text)
+    if len(parts) == 2:
+        whole, fraction = parts
+        suffix = re.search(r"\s+(десятых|сотых|тысячных)$", fraction)
+        if suffix:
+            denominator = {"десятых": 10, "сотых": 100, "тысячных": 1000}[suffix.group(1)]
+            numerator = integer(fraction[:suffix.start()])
+            if numerator >= denominator:
+                raise ValueError("Неверная дробная часть гаммы")
+            return integer(whole) + numerator / denominator
+        words = fraction.split()
+        digits = ("".join(str(NUM[word]) for word in words)
+                  if words and all(word in NUM and NUM[word] < 10 for word in words)
+                  else fraction if fraction.isdigit() else str(integer(fraction)))
+        return integer(whole) + int(digits) / 10 ** len(digits)
+    words = text.split()
+    if len(words) >= 2 and all(word in NUM and NUM[word] < 10 for word in words):
+        return float(str(NUM[words[0]]) + "." + "".join(str(NUM[word]) for word in words[1:]))
+    return float(integer(text))
 
 
 def run_ps(cmd, timeout=60):
@@ -149,12 +201,18 @@ BROWSER_WORDS = [
     (r"(майкрософт )?эдж\w*|edge", "edge"),
     (r"брейв\w*|brave", "brave"),
     (r"вивальди|vivaldi", "vivaldi"),
+    (r"зен\w*|зэн\w*|zen", "zen"),
 ]
 BROWSER_NAMES = {"chrome": "Google Chrome", "yandex": "Яндекс Браузер", "opera": "Opera", "firefox": "Firefox",
-                 "edge": "Edge", "brave": "Brave", "vivaldi": "Vivaldi"}
+                 "edge": "Edge", "brave": "Brave", "vivaldi": "Vivaldi", "zen": "Zen Browser"}
 # «… в хроме», «… через яндекс браузер», «… в браузере опера» — только в конце фразы
 BROWSER_SUFFIX = re.compile(r"\s+(в|через)\s+(браузер\w*\s+)?(?P<b>" + "|".join(p for p, _ in BROWSER_WORDS)
                             + r")(\s+браузер\w*)?$")
+VOLUME_RE = (r"громкост|громче|тише|(вкл|выкл|отключ|убер|верни|включ|убав|прибав|уменьш|увелич|пониз|повыс)"
+             r"\w* звук|звук (на|в) |без звука|замуть")
+AUDIO_ALIASES = {"дискорд": "discord", "телеграм": "telegram", "телеграмм": "telegram",
+                 "телега": "telegram", "стим": "steam", "спотифай": "spotify", "ватсап": "whatsapp",
+                 "зум": "zoom", "обс": "obs64", "влс": "vlc", "влц": "vlc"}
 
 
 def installed_browsers():
@@ -488,7 +546,7 @@ def analyze_pc():
 
 # ---------------- ютуб ----------------
 
-BROWSERS = ("firefox", "chrome", "msedge", "opera", "browser", "brave", "vivaldi", "yandex")
+BROWSERS = ("firefox", "chrome", "msedge", "opera", "browser", "brave", "vivaldi", "yandex", "zen")
 
 
 def browser_playing():
@@ -967,9 +1025,15 @@ class Actions:
              r"верх|низ|центр|середин|другую сторону)", self.move),
             (r"(выключи|перезагрузи|перезапусти) (компьютер|пк|комп|систему)", self.power),
             (r"заблокируй (компьютер|пк|комп|экран)", self.lock),
-            (r"громкост|громче|тише|(вкл|выкл|отключ|убер|верни|включ)\w* звук|звук (на|в) |без звука|замуть", self.volume),
+            (VOLUME_RE, self.volume),
             (r"яркост|ярче|темнее", self.brightness),
-            (r"(проанализ|анализ|диагност|провер|просканир|сканир)\w*.*(пк|компьютер|комп|систем|ошибк)", self.analyze),
+            (r"^(ночь|включи ночь|ночной режим|включи ночной режим|гамма на максимум)$", self.night),
+            (r"^(день|выключи ночь|выключи ночной режим|верни гамму|сбрось гамму|обычная гамма)$", self.day),
+            (GAMMA_VALUE_RE, self.gamma_value),
+            (r"^(пожалуйста )?((проанализируй|проанализировать|проверь|проверить|просканируй|просканировать|"
+             r"сканируй|сканировать)\b.*\b(пк|компьютер\w*|комп|систем\w*|ошибк\w*)|"
+             r"((сделай|проведи|выполни) )?(анализ|диагностика|диагностику|проверка|проверку|сканирование)"
+             r"\s+(моего |мой |мою )?(пк|компьютер\w*|комп|систем\w*|ошибк\w*))", self.analyze),
             # --- микрофон (выполняет main: там живёт слушатель) ---
             (r"(какой|какое) (сейчас )?(микрофон|устройство ввода)|что за микрофон|(через )?какой микрофон",
              lambda c, m: Reply("", "mic_info")),
@@ -983,13 +1047,25 @@ class Actions:
             (r"^(поставь |поставить )?(на )?пауз\w*( музык\w*| видео| трек| песн\w*| ролик)?$|"
              r"^(останови|приостанови|тормозни|стопни)( музык\w*| видео| трек| песн\w*| воспроизведение| ролик)?$|"
              r"^(выключи|стоп) (музык\w*|видео|трек|песн\w*|ролик)$", self.media_pause),
-            (r"^(продолжи|продолжай|играй|воспроизведи|сними( с)? пауз\w*|сними)( музык\w*| видео| трек| песн\w*|"
+            (r"^(включи|запусти|поставь) музыку$", self.music),
+            (r"^(продолжи|продолжай|продолжим|продолжить|играй|воспроизведи|сними( с)? пауз\w*|сними)( музык\w*| видео| трек| песн\w*|"
              r" воспроизведение| ролик)?$|^(включи|запусти) (дальше|обратно|снова)$|"
-             r"^(включи|запусти) (музык\w*|видео|трек|песн\w*) (обратно|снова|дальше)$", self.media_play),
-            (r"^(следующ\w*|дальше|переключи|скипни|пропусти)( трек| песн\w*| видео| композици\w*| ролик)?$|"
-             r"^(включи|давай) следующ\w*( трек| песн\w*| видео| ролик)?$", self.media_next),
-            (r"^(предыдущ\w*|прошл\w*)( трек| песн\w*| видео| композици\w*| ролик)?$|"
-             r"^(включи|верни) (предыдущ|прошл)\w*( трек| песн\w*| видео| ролик)?$", self.media_prev),
+             r"^(включи|запусти) (музык\w*|видео|трек|песн\w*) (обратно|снова|дальше)$|"
+             r"^(просто )?(музык\w*|видео|трек|песн\w*) (продолжи|продолжай|продолжим)$", self.media_play),
+            (r"^(следующ\w*|дальше|переключи|скипни|пропусти|некст|next|скип|skip)"
+             r"( трек| песн\w*| видео| композици\w*| ролик| track| song)?$|"
+             r"^(включи|давай|поставь|переключи на) следующ\w*( трек| песн\w*| видео| ролик)?$", self.media_next),
+            (r"^(предыдущ\w*|прошл\w*|прев|превиус|prev|previous)"
+             r"( трек| песн\w*| видео| композици\w*| ролик| track| song)?$|"
+             r"^(включи|верни|поставь|переключи на) (предыдущ|прошл)\w*( трек| песн\w*| видео| ролик)?$", self.media_prev),
+            (r"^(зацикли\w*|повторяй)( (эту|текущую|этот|текущий|все|весь))?"
+             r"( песн\w*| трек\w*| музык\w*| плейлист| список| очередь)?$|"
+             r"^(включи|выключи|отключи|убери|сними) (зацикливание|повтор)"
+             r"( (одной|одного|этой|этого|всех|всего))?( песн\w*| песен| трек\w*| плейлиста| списка| очереди)?$",
+             self.media_repeat),
+            (r"^(перемешай|перемешивай|перетасуй)( песни| треки| музыку| плейлист| очередь)?$|"
+             r"^(включи|выключи|отключи|убери) (перемешивание|случайный порядок|шаффл)$|"
+             r"^(играй|включи музыку) (в случайном порядке|вперемешку)$", self.media_shuffle),
             (r"что (сейчас )?(играет|звучит|за (песн|трек|музык|видео)\w*)", self.media_info),
             (r"^(поставь|включи|начни|запусти|давай|играй|воспроизведи)( видео| музык\w*| трек| песн\w*| ролик)? "
              r"(на|с|со) "
@@ -1038,6 +1114,47 @@ class Actions:
             (r"какое (сегодня )?число|какая (сегодня )?дата|какой сегодня день", self.date),
             (r"скриншот|скрин экрана|сделай скрин", self.screenshot),
         ]
+
+    @staticmethod
+    def normalize_voice_command(cmd):
+        """Vosk путает заимствованное «некст» с «текст». Поправка только для короткой команды плееру."""
+        if norm(cmd) not in ("текст", "текст трек"):
+            return cmd
+        try:
+            player = media.now_playing()
+        except Exception:
+            player = None
+        if player is not None or automation.find_window(("youtube music", "ютуб музыка")):
+            log.info("Голосовая команда уточнена: %s → следующий трек", cmd)
+            return "следующий трек"
+        return cmd
+
+    def is_fast_command(self, cmd):
+        """Однозначная короткая команда Vosk: повторное распознавание в интернете не нужно.
+        Проверка ничего не выполняет; свободный текст, поиск и опасные действия сюда не входят."""
+        c = norm(cmd)
+        if len(c.split()) > 10:
+            return False
+        if re.fullmatch(GAMMA_VALUE_RE, c):
+            return True
+        if re.fullmatch(r"ночь|день|включи ночь|выключи ночь|верни гамму|сбрось гамму|гамма на максимум|"
+                        r"(включи |выключи )?ночной режим|обычная гамма", c):
+            return True
+        if re.fullmatch(r"(продолжи|продолжай|продолжим|продолжить)( музык\w*| песн\w*| трек| видео)?", c):
+            return True
+        if re.fullmatch(r"(некст|next|скип|skip|прев|превиус|prev|previous)( трек| песню| track| song)?", c):
+            return True
+        if re.fullmatch(r"(поставь |поставить )?(на )?пауз\w*|"
+                        r"(останови|приостанови|продолжи|продолжай|включи) (музыку|видео|трек)( дальше| снова)?|"
+                        r"(следующий|предыдущий) (трек|ролик)|который час|сколько времени|какая сегодня дата", c):
+            return True
+        if re.fullmatch(r"(сделай |поставь |установи )?(громкость|яркость) "
+                        r"(браузера |экрана )?(\d{1,3}|ноль|сто)|"
+                        r"(включи|выключи|отключи|убери|верни) звук( браузера)?|"
+                        r"(сделай )?(громче|тише|ярче|темнее)( на \d{1,3})?", c):
+            return True
+        m = re.fullmatch(r"открой (.+)", c)
+        return bool(m and m.group(1) in self.sites)
 
     def handle(self, cmd):
         c = norm(cmd)
@@ -1106,7 +1223,8 @@ class Actions:
             webbrowser.open(url)
 
     def handle_one(self, c):
-        m = BROWSER_SUFFIX.search(c)
+        # В командах звука браузер — цель изменения громкости, а не способ открыть ссылку.
+        m = None if re.search(VOLUME_RE, c) else BROWSER_SUFFIX.search(c)
         self.browser_once, missing = None, None
         if m:  # «открой ютуб в хроме» — браузер только для этой команды
             if find_browser(m.group("b")):
@@ -1341,37 +1459,78 @@ class Actions:
         return Reply(line("media_paused"))
 
     def media_play(self, c, m):
-        if self.media_paused == "youtube" or (not self.media_paused and automation.find_window(("youtube",))
-                                              and not media.now_playing()):
-            def started():
-                for _ in range(8):  # у трансляций звук появляется не сразу
-                    time.sleep(0.5)
-                    if browser_playing():
-                        return True
-                return False
-            for b in BROWSERS:  # сначала системной командой — без переключения окон
-                if media.control("play", source=f"{b}.exe")[0]:
-                    break
-            if started() or (self._youtube_keys([["k"]]) and started()):
-                return Reply(line("media_play"))
-            if self.media_paused == "youtube":  # не включаем вместо YouTube какой-то другой плеер
-                return Reply(line("media_play_fail"))
-        ok, desc, src = media.control("play", source=self.media_paused)
-        if not ok:
-            return Reply(line("media_none"))
-        return Reply(line("media_play"))
+        return Reply(line("media_play") if self._resume_song() else line("media_play_fail"))
+
+    def _resume_song(self):
+        """Только play, без переключения play/pause: тишина не означает, что песня на паузе."""
+        source = self.media_paused if self.media_paused != "youtube" else None
+        try:
+            ok, _, _ = media.control("play", source=source)
+        except Exception as error:
+            log.info("Не удалось продолжить музыку: %s", error)
+            ok = False
+        if ok:
+            self.media_paused = None
+            return True
+        if media.music_page_control("play"):
+            self.media_paused = None
+            return True
+        return False
+
+    def music(self, c, m):
+        """Продолжить песню; если плеер недоступен — открыть YouTube Music."""
+        if self._resume_song():
+            return Reply(line("media_play"))
+        self.web("https://music.youtube.com/")
+        return Reply("Открываю YouTube Music.")
 
     def media_next(self, c, m):
-        ok, desc, _ = media.control("next")
+        ok = self._skip_song("next")
         if not ok:
             return Reply(line("media_none"))
         time.sleep(0.8)  # даём плееру переключиться, чтобы назвать новый трек
-        info = media.now_playing()
+        try:
+            info = media.now_playing()
+        except Exception:
+            info = None
         return Reply(line("media_next", t=info[0]) if info and info[0] else line("done"))
 
     def media_prev(self, c, m):
-        ok, desc, _ = media.control("prev")
+        ok = self._skip_song("prev")
         return Reply(line("done") if ok else line("media_none"))
+
+    @staticmethod
+    def _skip_song(action):
+        try:
+            if media.control(action)[0]:
+                return True
+        except Exception as error:
+            log.info("Плеер не переключил песню: %s", error)
+        return media.music_page_control(action)
+
+    @staticmethod
+    def _set_playback_mode(action, value):
+        try:
+            if media.playback_mode(action, value):
+                return True
+        except Exception as error:
+            log.info("Плеер не изменил режим: %s", error)
+        return media.music_page_control(action, value)
+
+    def media_repeat(self, c, m):
+        off = re.match(r"^(выключи|отключи|убери|сними)\b", c)
+        all_songs = re.search(r"плейлист|спис|очеред|\bвсе\w*\b", c)
+        mode = "off" if off else "list" if all_songs else "track"
+        if not self._set_playback_mode("repeat", mode):
+            return Reply("Не удалось изменить повтор. Открой вкладку YouTube Music или плеер с поддержкой повтора.")
+        return Reply({"off": "Повтор выключен.", "track": "Поставила песню на повтор.",
+                      "list": "Включила повтор плейлиста."}[mode])
+
+    def media_shuffle(self, c, m):
+        enabled = not re.match(r"^(выключи|отключи|убери)\b", c)
+        if not self._set_playback_mode("shuffle", enabled):
+            return Reply("Не удалось изменить перемешивание. Открой вкладку YouTube Music или плеер с поддержкой перемешивания.")
+        return Reply("Песни перемешаны." if enabled else "Перемешивание выключено.")
 
     def media_info(self, c, m):
         info = media.now_playing()
@@ -1571,25 +1730,169 @@ class Actions:
         return Reply(line("lock"))
 
     def volume(self, c, m):
+        target, operation = self._volume_request(c)
+        browser_names = [key for pattern, key in BROWSER_WORDS
+                         if re.fullmatch(r"(?:браузер\w*\s+)?(?:" + pattern + r")(?:\s+браузер\w*)?", target)]
+        browser_target = browser_names or re.fullmatch(r"браузер\w*", target)
+        if browser_target:
+            from pycaw.pycaw import AudioUtilities
+            executables = {"edge": {"msedge"}, "yandex": {"browser", "yandex"}}
+            names = (set().union(*(executables.get(name, {name}) for name in browser_names))
+                     if browser_names else set(BROWSERS))
+            volumes = []
+            for session in AudioUtilities.GetAllSessions():
+                try:
+                    if session.Process and os.path.splitext(session.Process.name())[0].lower() in names:
+                        volumes.append(session.SimpleAudioVolume)
+                except (psutil.Error, OSError):
+                    continue
+            if not volumes:
+                return Reply("Не нашла звуковую сессию браузера. Включи в нём звук и повтори команду.")
+            replies = [self._change_volume(operation, lambda v=v: round(v.GetMasterVolume() * 100),
+                                         lambda n, v=v: self._set_session_volume(v, n),
+                                         lambda on, v=v: v.SetMute(on, None)) for v in volumes]
+            return Reply("Браузер: " + replies[-1].text)
+        if target:
+            volumes = self._program_volumes(target)
+            if not volumes:
+                return Reply(f"Не нашла звуковую сессию «{target}». Включи звук в этой программе и повтори команду.")
+            replies = [self._change_volume(operation, lambda v=v: round(v.GetMasterVolume() * 100),
+                                         lambda n, v=v: self._set_session_volume(v, n),
+                                         lambda on, v=v: v.SetMute(on, None)) for v in volumes]
+            return Reply(target.capitalize() + ": " + replies[-1].text)
+        return self._change_volume(operation, get_volume, set_volume, set_mute)
+
+    @staticmethod
+    def _volume_request(c):
+        """Отделить название программы от действия и числа (в названии тоже бывают цифры)."""
+        target = re.sub(r"^(сделай|поставь|установи|выставь|измени|поменяй|убавь|прибавь|уменьши|увеличь|"
+                        r"понизь|повысь|выключи|включи|отключи|убери|верни|замуть)\s+", "", c)
+        target = re.sub(r"\b(громкость|звук|погромче|потише|громче|тише|без звука)\b", " ", target)
+        target = re.sub(r"\s+", " ", target).strip()
+        numbers = r"(?:\d{1,3}|" + "|".join(NUM) + r"|максимум|минимум|половину|половина|полную|всю)"
+        amount = rf"{numbers}(?:\s+{numbers})*(?:\s+процент\w*)?"
+        leading = re.fullmatch(rf"(?:на |до )?(?P<n>{amount})\s+(?:в|у|для)\s+(?P<t>.+)", target)
+        trailing = re.search(rf"(?:^|\s)(?:(?:на|до)\s+)?(?P<n>{amount})$", target)
+        value = ""
+        if leading:
+            value, target = leading.group("n"), leading.group("t")
+        elif trailing:
+            value, target = trailing.group("n"), target[:trailing.start()].strip()
+        if value in ("полную", "всю"):
+            value = "100"
+        target = re.sub(r"^(какая|какой|какую|сколько|текущая|текущую)\s*", "", target)
+        target = re.sub(r"^(в|у|для|на)\s+", "", target)
+        target = re.sub(r"^(программ\w*|приложени\w*)\s+", "", target).strip()
+        if target in ("", "общая", "общую", "системная", "системную", "системы", "компьютера",
+                      "компьютере", "windows", "на полную", "на всю"):
+            target = ""
+        if re.search(r"(выключи|отключи|убери)\w* звук|без звука|замуть", c):
+            operation = "выключи звук"
+        elif re.search(r"(включи|верни)\w* звук", c) and not value:
+            operation = "включи звук"
+        else:
+            direction = "громкость" if re.search(r"\bдо\s", c) else "громче" if re.search(r"громче|прибав|увелич|повыс|выше", c) else (
+                "тише" if re.search(r"тише|убав|уменьш|пониз|ниже", c) else "громкость")
+            operation = direction + " " + value
+        return target, operation.strip()
+
+    @staticmethod
+    def _audio_name(name):
+        words = norm(name).split()
+        # Частые русские падежи: «дискорда», «в дискорде», «телеграму».
+        return " ".join(re.sub(r"(ами|ями|ого|ому|ом|ем|ах|ях|а|я|у|ю|е|ы|и)$", "", word)
+                        if re.fullmatch(r"[а-я]{4,}", word) else word for word in words)
+
+    def _program_volumes(self, target):
+        from pycaw.pycaw import AudioUtilities
+        key = self._audio_name(target)
+        variants = {key, self._audio_name(translit(target))}
+        for alias, name in {**AUDIO_ALIASES, **self.aliases}.items():
+            if self._audio_name(alias) == key:
+                variants.add(self._audio_name(name))
+        for name, command in self.apps.items():
+            if self._audio_name(name) == key and isinstance(command, str):
+                match = re.match(r'^\s*"?([^"]+?\.exe)(?:"|\s|$)', command)
+                executable = match.group(1) if match else command
+                variants.add(self._audio_name(os.path.splitext(os.path.basename(executable))[0]))
+        if "steam" in variants:
+            variants.add("steamwebhelper")
+        volumes = []
+        for session in AudioUtilities.GetAllSessions():
+            try:
+                process = session.Process
+                if not process:
+                    continue
+                labels = [os.path.splitext(process.name())[0], getattr(session, "DisplayName", "")]
+                matched = any(isinstance(label, str) and self._audio_name(label) in variants for label in labels)
+                if not matched:
+                    try:
+                        matched = self._audio_name(file_description(process.exe())) in variants
+                    except (AttributeError, psutil.Error, OSError):
+                        pass
+                if matched:
+                    volumes.append(session.SimpleAudioVolume)
+            except (psutil.Error, OSError):
+                continue
+        return volumes
+
+    @staticmethod
+    def _set_session_volume(volume, value):
+        volume.SetMasterVolume(value / 100, None)
+        if value > 0:
+            volume.SetMute(False, None)
+
+    @staticmethod
+    def _change_volume(c, read_volume, write_volume, mute):
         if re.search(r"(выключи|выключить|отключи|убери|убрать)\w* звук|без звука|замуть", c):
-            set_mute(True)
+            mute(True)
             return Reply(line("mute"))
         if re.search(r"(включи|включить|верни)\w* звук", c) and parse_number(c) is None:
-            set_mute(False)
+            mute(False)
             return Reply(line("unmute"))
         n = parse_number(c)
-        cur = get_volume()
+        cur = read_volume()
         if re.search(r"громче|прибав|увелич|повыс|выше", c):
-            new = cur + (n or 10)
+            new = cur + (n if n is not None else 10)
         elif re.search(r"тише|убав|уменьш|пониз|ниже", c):
-            new = cur - (n or 10)
+            new = cur - (n if n is not None else 10)
         elif n is not None:
             new = n
         else:
             return Reply(line("vol_now", n=cur))
         new = max(0, min(100, new))
-        set_volume(new)
+        write_volume(new)
         return Reply(line("vol_set", n=new))
+
+    def gamma_value(self, c, m):
+        limits = f"от {gamma.MIN_GAMMA:g} до {gamma.MAX_GAMMA:g}".replace(".", ",")
+        try:
+            value = parse_gamma_value(m.group("value"))
+            if not gamma.MIN_GAMMA <= value <= gamma.MAX_GAMMA:
+                return Reply(f"Укажи гамму {limits}. Например: поставь гамму два с половиной.")
+            gamma.set_gamma(value)
+        except ValueError:
+            return Reply(f"Назови гамму {limits}. Например: гамма два с половиной.")
+        except OSError as error:
+            log.exception("Не удалось установить гамму")
+            return Reply(f"Не смогла изменить гамму: {error}.")
+        return Reply("Гамма " + f"{value:g}".replace(".", ",") + ".")
+
+    def night(self, c, m):
+        try:
+            gamma.night()
+        except (OSError, ValueError) as error:
+            log.exception("Не удалось включить ночную гамму")
+            return Reply(f"Не смогла изменить гамму: {error}.")
+        return Reply("Ночь. Гамма на максимуме, тёмные участки высветлены.")
+
+    def day(self, c, m):
+        try:
+            restored = gamma.restore()
+        except (OSError, ValueError) as error:
+            log.exception("Не удалось вернуть гамму")
+            return Reply(f"Не смогла вернуть гамму: {error}.")
+        return Reply("Вернула исходную гамму." if restored else "Сохранённой гаммы нет. Сначала включи режим «ночь».")
 
     def brightness(self, c, m):
         try:

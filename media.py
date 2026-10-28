@@ -79,8 +79,130 @@ def control(action, source=None):
         f = {"pause": s.try_pause_async, "play": s.try_play_async, "toggle": s.try_toggle_play_pause_async,
              "next": s.try_skip_next_async, "prev": s.try_skip_previous_async}[action]
         ok = await f()
-        return ok, await _describe(s), s.source_app_user_model_id
+        try:
+            description = await _describe(s)
+        except Exception:
+            description = ""  # команда уже отправлена; ошибка метаданных не должна повторять переключение
+        return ok, description, s.source_app_user_model_id
     return _run(go())
+
+
+def playback_mode(action, value):
+    """repeat: off/track/list; shuffle: bool. False — плеер не поддерживает режим."""
+    async def go():
+        s = await _pick()
+        if not s:
+            return False
+        controls = s.get_playback_info().controls
+        if action == "shuffle":
+            return bool(controls.is_shuffle_enabled and await s.try_change_shuffle_active_async(bool(value)))
+        if action == "repeat":
+            from winrt.windows.media import MediaPlaybackAutoRepeatMode as Mode
+            mode = {"off": Mode.NONE, "track": Mode.TRACK, "list": Mode.LIST}[value]
+            return bool(controls.is_repeat_enabled and await s.try_change_auto_repeat_mode_async(mode))
+        raise ValueError(action)
+    return _run(go())
+
+
+def _music_buttons(hwnd):
+    import comtypes.client
+    comtypes.client.GetModule("UIAutomationCore.dll")
+    from comtypes.gen import UIAutomationClient as UIA
+    uia = comtypes.client.CreateObject(UIA.CUIAutomation, interface=UIA.IUIAutomation)
+    root = uia.ElementFromHandle(hwnd)
+    condition = uia.CreateOrCondition(
+        uia.CreatePropertyCondition(UIA.UIA_NamePropertyId, "Панель проигрывателя"),
+        uia.CreatePropertyCondition(UIA.UIA_NamePropertyId, "Player bar"))
+    player = root.FindFirst(UIA.TreeScope_Descendants, condition)
+    if not player:
+        return []
+    buttons = player.FindAll(UIA.TreeScope_Descendants,
+                          uia.CreatePropertyCondition(UIA.UIA_ControlTypePropertyId, UIA.UIA_ButtonControlTypeId))
+    return [buttons.GetElement(i) for i in range(buttons.Length)]
+
+
+def _music_button_info(button):
+    """Опознать кнопку и текущее состояние по доступному названию YouTube Music."""
+    name = (button.CurrentName or "").lower().replace("ё", "е")
+    if re.fullmatch(r"(play|воспроизвести|играть|начать воспроизведение)(\s*\(.*\))?", name):
+        return "play", False
+    if re.fullmatch(r"(pause|приостановить|пауза|приостановить воспроизведение)(\s*\(.*\))?", name):
+        return "play", True
+    if re.fullmatch(r"(next( song| track)?|далее|следующ(ая песня|ая композиция|ий трек))(\s*\(.*\))?", name):
+        return "next", None
+    if re.fullmatch(r"(previous( song| track)?|назад|предыдущ(ая песня|ая композиция|ий трек))(\s*\(.*\))?", name):
+        return "prev", None
+    if re.search(r"shuffle|перемеш|случайн.*поряд", name):
+        if re.search(r"выключить|отключить|turn off|disable", name):
+            return "shuffle", True
+        if re.search(r"включить|turn on|enable", name):
+            return "shuffle", False
+        if re.search(r"выкл|отключ|\boff\b", name):
+            return "shuffle", False
+        if re.search(r"вкл|\bon\b", name):
+            return "shuffle", True
+        props = (button.CurrentAriaProperties or "").lower()
+        if "pressed=true" in props or "pressed=false" in props:
+            return "shuffle", "pressed=true" in props
+        return "shuffle", None
+    if re.search(r"repeat|повтор", name):
+        if re.search(r"выкл|отключ|\boff\b", name):
+            return "repeat", "off"
+        if re.search(r"\bone\b|\b1\b|один|одн|текущ", name):
+            return "repeat", "track"
+        if re.search(r"\ball\b|все|весь|списк|очеред", name):
+            return "repeat", "list"
+        return "repeat", None
+    return None, None
+
+
+def _invoke_music_button(button):
+    from comtypes.gen import UIAutomationClient as UIA
+    button.GetCurrentPattern(UIA.UIA_InvokePatternId).QueryInterface(UIA.IUIAutomationInvokePattern).Invoke()
+
+
+def music_page_control(action, value=None):
+    """Запасной способ: кнопки открытой вкладки music.youtube.com, с проверкой режима."""
+    import automation
+    try:
+        hwnd = automation.find_window(("youtube music", "ютуб музыка"))
+        if not hwnd:
+            return False
+        url = browser_url(hwnd)
+        if not url or urllib.parse.urlparse(url).hostname != "music.youtube.com":
+            return False
+        for _ in range(4):  # у повтора три состояния; не переключаем режим вслепую
+            button = next((b for b in _music_buttons(hwnd)
+                           if b.CurrentIsEnabled and _music_button_info(b)[0] == action), None)
+            if button is None:
+                return False
+            _, state = _music_button_info(button)
+            if action == "play":
+                if state is True:
+                    return True
+                if state is not False:
+                    return False
+                _invoke_music_button(button)
+                time.sleep(0.15)
+                continue
+            if action in ("next", "prev"):
+                _invoke_music_button(button)
+                return True
+            if state is None:
+                # В YouTube Music «Перемешать» — действие над очередью, без доступного состояния режима.
+                # Выполняем его один раз, а выключение неизвестного режима не имитируем.
+                if action == "shuffle" and value is True and button.CurrentName.lower() in ("перемешать", "shuffle"):
+                    _invoke_music_button(button)
+                    return True
+                return False
+            if state == value:
+                return True
+            _invoke_music_button(button)
+            time.sleep(0.15)
+        return False
+    except Exception:
+        log.exception("Не удалось изменить воспроизведение в YouTube Music")
+        return False
 
 
 def seek(seconds=None, delta=None):
@@ -311,7 +433,6 @@ def navigate(hwnd, url):
 def youtube_url_seek(seconds):
     """Перематывает видео YouTube: открывает ту же ссылку, где метка времени t заменена на нужную."""
     import automation
-    from actions import send_keys
     hwnd = automation.find_window(("youtube",))
     if not hwnd or not automation.focus(hwnd):
         return False

@@ -1,5 +1,6 @@
 """Капри — голосовой ассистент для Windows.
 Запуск: run.bat (или pythonw main.py)."""
+import copy
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
+AI_CANCELLED = object()
 
 # журнал — до всех библиотек: если какой-то не хватает, Капри падает без окна, и узнать причину можно только тут
 logging.basicConfig(filename=os.path.join(BASE, "capri.log"), level=logging.INFO, encoding="utf-8",
@@ -56,6 +58,8 @@ DEFAULTS = {
     "enable_ai": False,
     "local_ai": True,
     "local_model": "qwen3:8b",
+    "local_keep_alive": "30m",
+    "local_timeout_seconds": 15,
     "barge_in": True,
     "mic_device": None,
     "chatter": True,
@@ -85,7 +89,8 @@ DEFAULTS = {
     "voice_lively": False,
     "voice_fx": 1.8,
     "listen_window_seconds": 8,
-    "followup_seconds": 6,
+    "phrase_pause_seconds": 0.9,  # ожидание продолжения после короткой паузы, выделенной Vosk
+    "followup_seconds": 0,
     "hide_after_seconds": 12,
     "greet_on_start": True,
     "vosk_model": "models/vosk-model-small-ru-0.22",
@@ -272,6 +277,9 @@ class Capri(QObject):
         self.speaker = Speaker(cfg)
         self.jobs = queue.Queue()
         self.awake_until = 0.0
+        self.voice_generation = 0  # «стоп» отменяет голосовые задания, которые ещё обрабатываются
+        self.command_serial = 0
+        self.ai_call_lock = threading.Lock()
         self.last_partial_wake = 0.0
         self.speaking = False
         self.interrupted = False
@@ -295,7 +303,8 @@ class Capri(QObject):
             self.listener = Listener(model, self.on_final, self.on_partial, self.on_listener_error,
                                      device_name=self.cfg.get("mic_device") or None,
                                      gain=float(self.cfg.get("mic_gain", 1.0)),
-                                     sensitivity=int(self.cfg.get("mic_sensitivity", 100)))
+                                     sensitivity=int(self.cfg.get("mic_sensitivity", 100)),
+                                     phrase_pause_seconds=self.cfg.get("phrase_pause_seconds", 0.9))
             self.listener.start()
         else:
             self.jobs.put(("say", line("no_model")))
@@ -392,22 +401,51 @@ class Capri(QObject):
         self.subtitle.emit(line("listen"))
         log.info("Капри перебили")
 
+    def is_stop_command(self, text):
+        cmd = self.strip_wake(text).strip()
+        return bool(STOP_RE.match(cmd))
+
+    def stop_listening(self):
+        """Вернуться к ожиданию имени и отменить ещё не выполненные голосовые задания."""
+        self.voice_generation += 1
+        self.awake_until = 0.0
+        self.interrupted = True
+        self.speaker.stop()
+        self.actions.stop_background()
+        self.actions.pending = None
+        self.actions.choice = None
+        if self.listener:
+            self.listener.reset_req.set()
+        self.subtitle.emit("")
+        self.mode.emit("idle", 0.0)
+        log.info("Прослушивание остановлено, жду обращения по имени")
+
     def on_partial(self, text):
         now = time.time()
+        echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
+        if echo:
+            return
+        if self.is_stop_command(text):
+            self.stop_listening()
+            return
         if self.speaking:
             if self.cfg.get("barge_in") and self.wants_interrupt(text):
                 self.interrupt()
             return
+        if now <= self.awake_until:
+            # Имя уже прозвучало: окно ограничивает ожидание начала команды, а не её длину.
+            self.awake_until = now + self.cfg["listen_window_seconds"]
+            return
         if now - self.last_partial_wake > 3 and now > self.awake_until and self.has_wake(text):
             self.last_partial_wake = now
+            self.awake_until = now + self.cfg["listen_window_seconds"]
             self.appear(self.cfg["listen_window_seconds"])
 
     def on_final(self, text, audio):
         now = time.time()
-        if self.actions.autoscroll_active() and STOP_RE.search(text.lower()) and not self.is_echo(text):
-            # во время автопрокрутки «стоп» слышим и без имени
-            self.actions.stop_background()
-            self.subtitle.emit(line("scroll_stop"))
+        echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
+        if self.is_stop_command(text) and not echo:
+            self.stop_listening()
             return
         if self.speaking and not self.interrupted:
             if not (self.cfg.get("barge_in") and self.wants_interrupt(text)):
@@ -419,20 +457,16 @@ class Capri(QObject):
         if not woke and now > self.awake_until:
             return
         cmd = self.strip_wake(text) if woke else text
-        if STOP_RE.match(cmd.strip()) and len(cmd.split()) <= 3:
-            # «Капри, стоп» — замолчать, остановить автопрокрутку и слушать дальше
-            self.awake_until = now + self.cfg["listen_window_seconds"]
-            if self.actions.stop_background():
-                self.subtitle.emit(line("scroll_stop"))
-            return
         if len(cmd) < 2:
+            self.command_serial += 1
             self.awake_until = now + self.cfg["listen_window_seconds"]
             self.subtitle.emit("")
             if now - self.last_partial_wake > 3:
                 self.appear(self.cfg["listen_window_seconds"])
             return
         self.awake_until = 0
-        self.jobs.put(("voice", cmd, audio, woke))
+        self.command_serial += 1
+        self.jobs.put(("voice", cmd, audio, woke, self.voice_generation))
 
     def on_listener_error(self, err, kind="mic"):
         self.jobs.put(("say", line("model_broken" if kind == "model" else "no_mic")))
@@ -558,6 +592,7 @@ class Capri(QObject):
         self.subtitle.emit(line("listen"))
 
     def text_command(self, text):
+        self.command_serial += 1
         self.summon.emit()
         self.jobs.put(("text", text))
 
@@ -574,10 +609,56 @@ class Capri(QObject):
                 self._process(job)
             except Exception:
                 log.exception("Ошибка обработки %s", job[0])
-                self.say(line("crash"))
+                if job[0] != "voice" or job[4] == self.voice_generation:
+                    self.say(line("crash"))
+
+    def _ask_ai(self, ai, question, cancelled):
+        """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
+        while not self.ai_call_lock.acquire(blocking=False):
+            if cancelled():
+                return AI_CANCELLED
+            time.sleep(0.05)
+        if cancelled():
+            self.ai_call_lock.release()
+            return AI_CANCELLED
+        # Отменённый запрос не должен позже дописать ответ в историю разговора.
+        working = copy.copy(ai)
+        history = getattr(ai, "history", None)
+        if isinstance(history, list):
+            working.history = copy.deepcopy(history)
+        ready = threading.Event()
+        result = [None]
+
+        def ask():
+            try:
+                result[0] = working.ask(question)
+            except Exception:
+                log.exception("Ошибка запроса к ИИ")
+            finally:
+                self.ai_call_lock.release()
+                ready.set()
+
+        threading.Thread(target=ask, daemon=True).start()
+        while not ready.wait(0.05):
+            if cancelled():
+                log.info("Ожидание ИИ отменено: новая команда или стоп")
+                return AI_CANCELLED
+        if cancelled():
+            return AI_CANCELLED
+        if isinstance(history, list):
+            ai.history = working.history
+        return result[0]
 
     def _process(self, job):
         kind = job[0]
+        generation = job[4] if kind == "voice" else None
+        serial = self.command_serial
+
+        def cancelled():
+            return generation is not None and generation != self.voice_generation
+
+        if cancelled():
+            return
         if kind == "chatter":
             text = self.chatter_line()
             if random.random() < self.cfg.get("roam_chance", 0.5):
@@ -600,11 +681,12 @@ class Capri(QObject):
                 self.mode.emit("idle", 0.0)
             return
         if kind == "voice":
-            _, cmd, audio, woke = job
+            _, cmd, audio, woke, _ = job
+            cmd = self.actions.normalize_voice_command(cmd)
             self.summon.emit()
             self.mode.emit("thinking", 0.0)
             self.subtitle.emit("> " + cmd)
-            if self.cfg.get("use_google_stt"):
+            if self.cfg.get("use_google_stt") and not self.actions.is_fast_command(cmd):
                 better = google_stt(audio)
                 if better:
                     better = better.lower()
@@ -612,6 +694,11 @@ class Capri(QObject):
                         cmd = better
         else:
             cmd = job[1]
+        if cancelled():
+            return
+        if self.is_stop_command(cmd):
+            self.stop_listening()
+            return
         if self.has_wake(cmd):
             # имя могло остаться в тексте («капри нажми …»), если Капри уже слушала без него
             stripped = self.strip_wake(cmd)
@@ -622,20 +709,34 @@ class Capri(QObject):
                 self.subtitle.emit(line("listen"))
                 return
             cmd = stripped
+        if kind == "voice":
+            cmd = self.actions.normalize_voice_command(cmd)
         log.info("Команда: %s", cmd)
         self.mode.emit("thinking", 0.0)
         self.subtitle.emit("> " + cmd)
         self.reload_config_if_changed()
+        if cancelled():
+            return
 
         reply = self.actions.handle(cmd)
+        if cancelled():
+            return
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
         if reply is None:
+            ai_cancelled = lambda: cancelled() or serial != self.command_serial
             if self.cfg.get("enable_ai") and self.ai.available:
-                reply = Reply(self.ai.ask(cmd), "answer")
+                answer = self._ask_ai(self.ai, cmd, ai_cancelled)
+                if answer is AI_CANCELLED:
+                    return
+                reply = Reply(answer or "Не удалось получить ответ нейросети. Попробуй ещё раз.", "answer")
             else:
-                answer = self.local.ask(cmd) if self.local else None
+                answer = self._ask_ai(self.local, cmd, ai_cancelled) if self.local else None
+                if answer is AI_CANCELLED or cancelled():
+                    return
                 reply = Reply(answer, "answer") if answer else self.actions.fallback(cmd, force_search=bool(self.local))
+        if cancelled():
+            return
         if reply.action == "answer" and self.cfg.get("teleport_on_answer"):
             self.hop.emit()  # отвечает, скача по экрану красной молнией
         if reply.action == "wave":
@@ -655,18 +756,15 @@ class Capri(QObject):
         elif reply.action == "hide":
             self.vanish.emit()
         else:
-            follow = float(self.cfg["followup_seconds"])
-            self.awake_until = time.time() + follow
-            self.mode.emit("listening", follow)
+            # Одна команда на обращение. Для следующей фразы нужно снова позвать Капри.
+            self.mode.emit("idle", 0.0)
 
     def say(self, text):
         """Озвучивает текст. Возвращает True, если Капри перебили."""
         log.info("Капри: %s", text)
         self.subtitle.emit(text)
         self.mode.emit("speaking", 0.0)
-        barge_in = self.cfg.get("barge_in") and self.listener
-        if self.listener and not barge_in:
-            self.listener.muted.set()
+        # Микрофон остаётся включённым для «стоп», даже если перебивание именем отключено.
         self.speech_words = set(re.findall(r"\w+", text.lower().replace("ё", "е")))
         self.interrupted = False
         self.speaking = True
@@ -675,11 +773,8 @@ class Capri(QObject):
         finally:
             self.speaking = False
             self.speech_end = time.time()
-            if barge_in and not self.interrupted:
+            if self.listener and not self.interrupted:
                 self.listener.reset_req.set()  # выбрасываем эхо её голоса
-            if self.listener and not barge_in:
-                time.sleep(0.25)
-                self.listener.muted.clear()
         self._check_voice_blocked()
         return self.interrupted
 
@@ -707,7 +802,6 @@ class Capri(QObject):
                     return Reply(line("zapret_fail", e=e))
                 return Reply(line("zapret_fixed"))
             self.actions.pending = fix
-            self.awake_until = time.time() + 20  # ответ «да» без имени
             self.jobs.put(("say", line("zapret_offer")))
 
 
@@ -779,7 +873,7 @@ def main():
 
     menu = QMenu()
     for title, fn in (("Позвать Капри", capri.call_from_click),
-                      ("Замолчать", capri.interrupt),
+                      ("Замолчать", capri.stop_listening),
                       ("Написать команду…", ask_text),
                       ("Мои сайты, программы и ответы…", open_entries),
                       ("Как ко мне обращаться…", open_profile),

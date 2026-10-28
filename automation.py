@@ -40,8 +40,9 @@ def type_text(text, delay=0.012):
     for ch in text:
         if ch == "\n":
             ch = "\r"
-        for unit in ch.encode("utf-16-le").decode("utf-16-le"):
-            code = ord(unit)
+        encoded = ch.encode("utf-16-le")
+        for offset in range(0, len(encoded), 2):
+            code = int.from_bytes(encoded[offset:offset + 2], "little")
             down = INPUT(type=1, u=_INPUTUNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, 0)))
             up = INPUT(type=1, u=_INPUTUNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
             arr = (INPUT * 2)(down, up)
@@ -258,7 +259,7 @@ APP_WINDOWS = {  # как опознать окно приложения по з
     "дискорд": ("discord",), "discord": ("discord",),
     "ватсап": ("whatsapp",), "whatsapp": ("whatsapp",),
     "вк": ("вконтакте", "vk"), "вконтакте": ("вконтакте", "vk"),
-    "браузер": ("firefox", "chrome", "edge", "opera", "яндекс", "brave"),
+    "браузер": ("firefox", "chrome", "edge", "opera", "яндекс", "brave", "zen browser"),
 }
 TYPE_VERBS = r"напиши|напечатай|введи|набери|вбей|впиши|пиши"
 NOT_TYPING = r"(стих\w*|стишок|рассказ\w*|истори\w*|сказк\w*|шутк\w*|анекдот\w*|песн\w*|сочинени\w*|эссе)\b"

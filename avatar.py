@@ -624,7 +624,7 @@ class Avatar(QWidget):
         if len(self.poses) > 1:  # каждое появление — в случайной позе
             self.change_pose(random.randrange(len(self.poses)))
         if not self.user_moved:
-            self.move(self._random_spot())  # каждый раз появляется в новом месте экрана
+            self.move_to_named("bottom-left")  # появляемся слева снизу, над панелью задач
         self.state, self.k = "appearing", 0
         self.hide_at = 0
         self.show()

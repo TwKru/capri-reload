@@ -106,7 +106,8 @@ class Listener(threading.Thread):
     on_partial(text) — промежуточный результат (для быстрой реакции на имя).
     Микрофон можно сменить на ходу через set_device()."""
 
-    def __init__(self, model_path, on_final, on_partial, on_error, device_name=None, gain=1.0, sensitivity=100):
+    def __init__(self, model_path, on_final, on_partial, on_error, device_name=None, gain=1.0, sensitivity=100,
+                 phrase_pause_seconds=0.9):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.on_final = on_final
@@ -120,6 +121,7 @@ class Listener(threading.Thread):
         self.gain = gain                # громкость ввода для Капри: 1 — как есть, 2 — вдвое громче
         self.sensitivity = sensitivity  # 100 — слышит всё, меньше — тихие звуки (шум, фон) отбрасываются
         self.level = 0.0                # текущая громкость с микрофона 0..1 — для индикатора в настройках
+        self.phrase_pause_seconds = max(0.0, float(phrase_pause_seconds))
 
     def set_device(self, name):
         self.device_name = name or None
@@ -198,6 +200,10 @@ class Listener(threading.Thread):
         with stream:
             log.info("Микрофон открыт: %s", self.active_name)
             buf = bytearray()
+            pending_text = []
+            pending_audio = bytearray()
+            finish_at = None
+            segment_active = False
             was_muted = False
             last_audio = time.time()
             while not self.switch.is_set():
@@ -219,19 +225,45 @@ class Listener(threading.Thread):
                     self.reset_req.clear()
                     rec.Reset()
                     buf.clear()
+                    pending_text.clear()
+                    pending_audio.clear()
+                    finish_at = None
+                    segment_active = False
                 buf += data
+                now = time.monotonic()
                 if rec.AcceptWaveform(data):
                     text = json.loads(rec.Result()).get("text", "").strip()
-                    audio = bytes(buf)
+                    pending_audio += buf
                     buf.clear()
+                    segment_active = False
                     if text:
-                        self.on_final(text, audio)
+                        pending_text.append(text)
+                        finish_at = now + self.phrase_pause_seconds
+                        # «Стоп» и обращение по имени обрабатываем сразу, не ожидая склейки.
+                        self.on_partial(text)
                 else:
                     part = json.loads(rec.PartialResult()).get("partial", "")
                     if part:
+                        segment_active = True
                         self.on_partial(part)
                     if len(buf) > RATE * 2 * 25:
                         del buf[:RATE * 2 * 5]
+                if self.reset_req.is_set():
+                    continue  # например, «стоп» в промежуточном результате отменил всю фразу
+                # Endpoint Vosk означает конец фрагмента, а не обязательно всей команды.
+                # Дожидаемся продолжения; начатый следующий фрагмент не обрываем таймером.
+                if pending_text and self.level > 0.08:
+                    finish_at = now + self.phrase_pause_seconds
+                if pending_text and not segment_active and now >= finish_at:
+                    text = " ".join(pending_text)
+                    audio = bytes(pending_audio + buf)
+                    pending_text.clear()
+                    pending_audio.clear()
+                    buf.clear()
+                    finish_at = None
+                    self.on_final(text, audio)
+                elif not pending_text:
+                    pending_audio.clear()
 
 
 def google_stt(audio, language="ru-RU"):
@@ -463,8 +495,6 @@ class Speaker:
         self.engine = cfg.get("tts_engine", "edge")          # edge — Microsoft онлайн, silero — офлайн
         self.silero_voice = cfg.get("silero_voice", "xenia")
         self.silero_pitch = cfg.get("silero_pitch", "high")
-        self.path = os.path.join(tempfile.gettempdir(), f"capri_tts_{os.getpid()}.mp3")
-        self.fx_path = os.path.join(tempfile.gettempdir(), f"capri_tts_{os.getpid()}.wav")
         self.stop_event = threading.Event()
         self.volume = int(cfg.get("voice_volume", 100))  # громкость Капри 0..100, общая громкость Windows не меняется
         self.edge_error = None  # почему не сработал голос Microsoft в последний раз (None — сработал)
@@ -535,7 +565,8 @@ class Speaker:
         # тон поднимаем сами (Microsoft выше ~260 Гц не поднимает), а ускорение от этого
         # заранее гасим, замедляя синтез на столько же
         rates = [f"{round(_pct(self.rate) - (2 ** (k / 12) - 1) * 100):+d}%" for k in semis]
-        parts = [f"{self.path[:-4]}_{i}.mp3" for i in range(len(sentences))]
+        base = os.path.splitext(dst)[0]
+        parts = [f"{base}_{i}.mp3" for i in range(len(sentences))]
 
         async def go():  # фразы синтезируются параллельно — задержка как у одной
             await asyncio.gather(*(edge_tts.Communicate(s, self.voice, rate=r, pitch=self.pitch).save(f)
@@ -556,8 +587,9 @@ class Speaker:
             log.exception("Обработка голоса не удалась, говорю чистым голосом")
             if len(parts) == 1:
                 return parts[0]
-            asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch).save(self.path))
-            return self.path
+            fallback = base + ".mp3"
+            asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch).save(fallback))
+            return fallback
 
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------
     def _cache_path(self, text):
@@ -566,17 +598,25 @@ class Speaker:
                                  self.fx, self.volume, self.silero_voice)))
         return os.path.join(TTS_CACHE, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".wav")
 
-    def cached_render(self, text):
+    def cached_render(self, text, dst):
         """Путь к готовому звуку фразы: из кэша или свежий (и тогда кладём его в кэш)."""
         path = self._cache_path(text)
         if os.path.isfile(path):
             os.utime(path)  # свежие держим, старые потом удаляем
             return path
-        out = self.render(text, self.fx_path)
+        out = self.render(text, dst)
         if out.endswith(".wav") and len(text) <= CACHE_MAX_TEXT:  # длинные ответы нейросети не повторяются
             try:
                 os.makedirs(TTS_CACHE, exist_ok=True)
-                shutil.copyfile(out, path)
+                # Публикуем только готовый файл: другой поток не должен прочитать половину WAV.
+                with tempfile.NamedTemporaryFile(dir=TTS_CACHE, suffix=".tmp", delete=False) as f:
+                    staging = f.name
+                try:
+                    shutil.copyfile(out, staging)
+                    os.replace(staging, path)
+                finally:
+                    if os.path.exists(staging):
+                        os.remove(staging)
                 _trim_cache()
             except OSError:
                 pass
@@ -589,7 +629,8 @@ class Speaker:
             if not text or os.path.isfile(self._cache_path(text)):
                 continue
             try:
-                self.cached_render(text)
+                with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
+                    self.cached_render(text, os.path.join(folder, "voice.wav"))
             except Exception as e:
                 log.info("Предзагрузка фраз остановлена: %s", e)
                 return
@@ -597,10 +638,12 @@ class Speaker:
         log.info("Постоянные фразы озвучены заранее")
 
     def _edge(self, text):
-        path = self.cached_render(text)
-        if self.stop_event.is_set():
-            return True
-        return play_mp3(path, self.stop_event, self.volume)
+        # Отдельная папка на каждую фразу, включая предзагрузку. Держим её до конца воспроизведения.
+        with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
+            path = self.cached_render(text, os.path.join(folder, "voice.wav"))
+            if self.stop_event.is_set():
+                return True
+            return play_mp3(path, self.stop_event, self.volume)
 
     def _sapi(self, text):
         import comtypes.client
