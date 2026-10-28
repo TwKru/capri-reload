@@ -484,18 +484,30 @@ class Avatar(QWidget):
         self.lag = 0
         self.blink = 0
         self.user_moved = False
+        self.game_mode = False
         self._press = None
         self._moved = False
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(33)
 
     # ---------- управление ----------
+    def set_game_mode(self, active):
+        self.game_mode = bool(active)
+        if self.game_mode:
+            self.timer.stop()
+            self.overlay.timer.stop()
+            self.overlay.hide()
+            self.state = "hidden"
+            self.roaming = self.hopping = False
+            self.tele_target = self.hop_home = None
+            self.hide()
+
     def start_roam(self):
         """Прогулка: Капри появляется у одного края экрана и идёт вдоль панели задач к другому."""
-        if self.roam_img is None or self.state != "hidden":
+        if self.game_mode or self.roam_img is None or self.state != "hidden":
             return
+        self.timer.start(33)
         geo = QGuiApplication.primaryScreen().availableGeometry()
         self.home_pos = self.pos() if self.user_moved else None
         self.roam_dir = random.choice((-1, 1))
@@ -564,7 +576,7 @@ class Avatar(QWidget):
 
     def start_hopping(self):
         """Пока Капри отвечает, она скачет по экрану красной молнией."""
-        if self.roaming:
+        if self.game_mode or self.roaming:
             return
         if self.hop_home is None:
             self.hop_home = self.pos()
@@ -617,6 +629,9 @@ class Avatar(QWidget):
         self.next_pose = time.time() + random.uniform(12, 30)
 
     def summon(self):
+        if self.game_mode:
+            return
+        self.timer.start(33)
         self.stop_roam()
         if self.state in ("visible", "appearing"):
             self.burst, self.burst_level = 6, 0.9
@@ -662,6 +677,7 @@ class Avatar(QWidget):
             self.state, self.k = "visible", 0
         elif self.state == "vanishing" and self.k >= VANISH_FRAMES:
             self.state = "hidden"
+            self.timer.stop()
             self.hide()
             self.hopping, self.tele_target = False, None
             if self.hop_home is not None:
@@ -673,6 +689,7 @@ class Avatar(QWidget):
                     self.move(self.home_pos)
             return
         if self.state == "hidden":
+            self.timer.stop()
             return
         if self.mode_until and now > self.mode_until:
             self.set_mode("idle")
@@ -703,13 +720,13 @@ class Avatar(QWidget):
             frames = self.anims[self.anim]
             idx = int((time.time() - self.anim_start) * ANIM_FPS)
             if idx < len(frames) or self.anim_loop:
-                return frames[idx % len(frames)].copy()
+                return frames[idx % len(frames)]
             self.anim = None
         if self.roaming and self.roam_img is not None:
-            return self.roam_img.copy()
-        fig = self.base.copy()
+            return self.roam_img
         if self.eye_pos is None:
-            return fig
+            return self.base
+        fig = self.base.copy()
         p = QPainter(fig)
         p.setRenderHint(AA)
         cx, cy = self.eye_pos

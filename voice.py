@@ -523,6 +523,7 @@ class Speaker:
         self._edge_failures = 0
         self._recovery_lock = threading.Lock()
         self._last_render_ok = 0.0
+        self.background_paused = False
         if self.engine == "silero":  # прогреваем модель заранее, чтобы первая фраза не тормозила
             threading.Thread(target=self._warmup, daemon=True).start()
 
@@ -588,6 +589,8 @@ class Speaker:
 
     def prepare(self, text, force=False):
         """Подготовить короткую следующую фразу в фоне, не включая звук."""
+        if self.background_paused:
+            return False
         text = clean_for_speech(text)
         if not text or len(text) > CACHE_MAX_TEXT:
             return False
@@ -722,6 +725,8 @@ class Speaker:
     def prewarm(self, phrases):
         """Заранее озвучить постоянные фразы в фоне, по одной — чтобы потом они звучали сразу."""
         for text in phrases:
+            while self.background_paused:
+                time.sleep(2)
             text = clean_for_speech(text)
             if not text or os.path.isfile(self._cache_path(text)):
                 continue

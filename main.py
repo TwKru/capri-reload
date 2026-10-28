@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import updater
+from game_mode import fullscreen_app_active
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -36,7 +37,7 @@ def fatal(text):
 
 
 try:
-    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, Signal, QTimer
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QSlider,
                                    QSystemTrayIcon, QWidget, QWidgetAction)
@@ -67,6 +68,7 @@ DEFAULTS = {
     "router_timeout_seconds": 2.5,
     "router_num_gpu": 0,
     "web_app_lookup": True,
+    "auto_game_mode": True,
     "barge_in": True,
     "mic_device": None,
     "chatter": True,
@@ -237,26 +239,6 @@ STOP_RE = re.compile(r"\b(стоп|хватит|молчи|замолчи|пом
                      r"заткнись|умолкни)\b")
 
 
-def fullscreen_app_active():
-    """Открыта игра или видео на весь экран — тогда не лезем со спонтанными репликами."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-        u = ctypes.windll.user32
-        hwnd = u.GetForegroundWindow()
-        if not hwnd:
-            return False
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(hwnd, cls, 64)
-        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
-            return False  # рабочий стол
-        r = wintypes.RECT()
-        u.GetWindowRect(hwnd, ctypes.byref(r))
-        return (r.right - r.left) >= u.GetSystemMetrics(0) and (r.bottom - r.top) >= u.GetSystemMetrics(1)
-    except Exception:
-        return False
-
-
 class Capri(QObject):
     summon = Signal()
     vanish = Signal()
@@ -291,6 +273,9 @@ class Capri(QObject):
         self.ai_call_lock = threading.Lock()
         self.router_call_lock = threading.Lock()
         self.update_process = None
+        self.game_active = False
+        self._game_memory_released = False
+        self._game_release_retry_at = 0.0
         self.last_partial_wake = 0.0
         self.speaking = False
         self.interrupted = False
@@ -308,7 +293,10 @@ class Capri(QObject):
     def start(self):
         threading.Thread(target=self._worker, daemon=True).start()
         if self.local:
-            threading.Thread(target=self.local.start_server, daemon=True).start()
+            def start_local():
+                with self.ai_call_lock:
+                    self.local.start_server()
+            threading.Thread(target=start_local, daemon=True).start()
         if self.router:
             threading.Thread(target=self.router.warmup, daemon=True).start()
         model =os.path.join(BASE, self.cfg["vosk_model"])
@@ -328,6 +316,33 @@ class Capri(QObject):
             self.jobs.put(("say", CONFIG_ERROR))
         threading.Thread(target=self._chatter_loop, daemon=True).start()  # сам проверяет, включено ли
         threading.Thread(target=self._prewarm_voice, daemon=True).start()
+
+    def set_game_mode(self, active):
+        active = bool(active)
+        if active != self.game_active:
+            log.info("Игровой режим: %s", "включён" if active else "выключен")
+        self.game_active = active
+        self.speaker.background_paused = active
+        if self.local:
+            self.local.game_mode = active
+        if not active:
+            self._game_memory_released = False
+            return
+        if (not self.local or self._game_memory_released or
+                time.monotonic() < self._game_release_retry_at or not self.ai_call_lock.acquire(blocking=False)):
+            return
+        self._game_release_retry_at = time.monotonic() + 15
+        def release():
+            try:
+                if self.game_active:
+                    self.local.release_memory()
+                    self._game_memory_released = True
+                    log.info("Игровой режим: память большой модели освобождена")
+            except Exception as error:
+                log.info("Не удалось освободить память модели: %s", error)
+            finally:
+                self.ai_call_lock.release()
+        threading.Thread(target=release, daemon=True).start()
 
     def _prewarm_voice(self):
         """Через полминуты после запуска озвучиваем в фоне постоянные фразы и свои ответы — потом они
@@ -389,7 +404,7 @@ class Capri(QObject):
         return re.sub(r"^[\s,.!?]+|[\s,.!?]+$", "", t)
 
     def appear(self, seconds):
-        if self.glitch_wav:
+        if self.glitch_wav and not self.game_active:
             play_sound_async(self.glitch_wav)
         self.summon.emit()
         self.mode.emit("listening", float(seconds))
@@ -897,6 +912,15 @@ def main():
     avatar.hide_after = float(cfg["hide_after_seconds"])
     apply_user(cfg)
     capri = Capri(cfg)
+    def refresh_game_mode():
+        active = bool(capri.cfg.get("auto_game_mode", True) and fullscreen_app_active())
+        avatar.set_game_mode(active)
+        capri.set_game_mode(active)
+    game_timer = QTimer(app)
+    game_timer.setInterval(2000)
+    game_timer.timeout.connect(refresh_game_mode)
+    refresh_game_mode()
+    game_timer.start()
     capri.summon.connect(avatar.summon)
     capri.vanish.connect(avatar.vanish)
     capri.mode.connect(avatar.set_mode)
@@ -947,6 +971,7 @@ def main():
                       ("Спрятать", avatar.vanish),
                       ("MIC", None),
                       ("SEARCH", None),
+                      ("GAME", None),
                       ("Открыть config.json", lambda: os.startfile(CONFIG_PATH)),
                       ("Проверить обновления Capri Reload", lambda: capri.text_command("проверь обновления")),
                       ("Обновить Capri Reload", lambda: capri.text_command("обновись")),
@@ -955,6 +980,17 @@ def main():
                       ("Выход", app.quit)):
         if title is None:
             menu.addSeparator()
+            continue
+        if title == "GAME":
+            game_act = QAction("Игровой режим автоматически", menu)
+            game_act.setCheckable(True)
+            game_act.setChecked(bool(capri.cfg.get("auto_game_mode", True)))
+            def toggle_game(on):
+                capri.cfg["auto_game_mode"] = bool(on)
+                save_setting("auto_game_mode", bool(on))
+                refresh_game_mode()
+            game_act.toggled.connect(toggle_game)
+            menu.addAction(game_act)
             continue
         if title == "MIC":
             mic_menu = menu.addMenu("Микрофон")

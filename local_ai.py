@@ -157,6 +157,7 @@ class LocalAI:
         self.timeout = max(1.0, float(cfg.get("local_timeout_seconds", 15)))
         self.router_model = cfg.get("router_model", "qwen3:0.6b")
         self.history = []
+        self.game_mode = False
         self.on_model_change = None  # main записывает новую модель в config.json
 
     @staticmethod
@@ -201,10 +202,22 @@ class LocalAI:
             if self.on_model_change:
                 self.on_model_change(other)
         try:
+            if self.game_mode:
+                log.info("Игровой режим: прогрев большой модели пропущен")
+                return
             _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": self.keep_alive}, 120)
             log.info("Локальная модель %s загружена", self.model)
         except Exception as e:
             log.info("Не удалось прогреть модель: %s", e)
+
+    def release_memory(self):
+        _post("/api/generate", {"model": self.model, "keep_alive": 0}, 5)
+
+    def _options(self, max_tokens):
+        options = {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15}
+        if self.game_mode:
+            options.update(num_gpu=0, num_thread=2)
+        return options
 
     def _chat(self, messages, max_tokens=300):
         resp = _post("/api/chat", {
@@ -213,7 +226,7 @@ class LocalAI:
             "stream": False,
             "think": False,  # Qwen3 по умолчанию «рассуждает» вслух — для голоса это лишняя задержка
             "keep_alive": self.keep_alive,
-            "options": {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15},
+            "options": self._options(max_tokens),
         }, self.timeout)
         text = strip_reasoning(resp.get("message", {}).get("content", ""))
         if REASONING.search(text):
@@ -228,7 +241,7 @@ class LocalAI:
         """Отдавать законченные предложения, пока Ollama дописывает остальной ответ."""
         payload = {"model": self.model, "messages": messages, "stream": True, "think": False,
                    "keep_alive": self.keep_alive,
-                   "options": {"num_predict": 300, "temperature": 0.6, "repeat_penalty": 1.15}}
+                   "options": self._options(300)}
         req = urllib.request.Request(URL + "/api/chat", data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
         raw, emitted = "", 0
