@@ -44,8 +44,8 @@ class MotionTests(unittest.TestCase):
         self.view.roam_last = 100
         position = self.view.roam_x
         self.view._roam_step(100.05)
-        self.assertAlmostEqual(abs(self.view.roam_x - position), 3.5)
-        self.assertAlmostEqual(self.view.walk_time, .05)
+        self.assertAlmostEqual(abs(self.view.roam_x - position), 7)
+        self.assertAlmostEqual(self.view.walk_time, .0325)
 
     def test_walk_faces_its_direction_and_loops(self):
         self.view.roaming = True

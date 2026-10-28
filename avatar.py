@@ -185,6 +185,8 @@ def load_custom(path, w, h):
 
 
 ANIM_FPS = 24
+WALK_SPEED = 140          # пикселей по экрану в секунду
+WALK_ANIMATION_SPEED = 0.65  # темп шага независимо от скорости перемещения
 TELE_OUT_FRAMES = 5      # сколько кадров Капри «сжимается» перед телепортом
 BOLT_MS = 380            # сколько живёт молния
 
@@ -629,8 +631,8 @@ class Avatar(QWidget):
         self.roam_last = now
         if self.state != "visible":
             return
-        self.walk_time += dt
-        self.roam_x += self.roam_dir * 70 * dt
+        self.walk_time += dt * WALK_ANIMATION_SPEED
+        self.roam_x += self.roam_dir * WALK_SPEED * dt
         lo, hi = geo.left() - 40, geo.right() - W + 40
         if not lo <= self.roam_x <= hi:
             if self.mode in ("thinking", "speaking"):
