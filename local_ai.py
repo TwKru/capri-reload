@@ -158,6 +158,7 @@ class LocalAI:
         self.router_model = cfg.get("router_model", "qwen3:0.6b")
         self.history = []
         self.game_mode = False
+        self.personality = None
         self.on_model_change = None  # main записывает новую модель в config.json
 
     @staticmethod
@@ -212,6 +213,10 @@ class LocalAI:
 
     def release_memory(self):
         _post("/api/generate", {"model": self.model, "keep_alive": 0}, 5)
+
+    def _context(self):
+        mood = self.personality.context() if self.personality else ""
+        return user_context() + ("\n" + mood if mood else "")
 
     def _options(self, max_tokens):
         options = {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15}
@@ -281,7 +286,7 @@ class LocalAI:
         now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         self.history.append({"role": "user", "content": question})
         self.history = self.history[-6:]
-        messages = [{"role": "system", "content": SYSTEM + "\n" + user_context() + f"\nСейчас {now}."}] + self.history
+        messages = [{"role": "system", "content": SYSTEM + "\n" + self._context() + f"\nСейчас {now}."}] + self.history
         spoken = []
 
         def emit(sentence):
@@ -321,7 +326,7 @@ class LocalAI:
         """Короткая спонтанная реплика, когда Капри появляется сама. None — если модель недоступна."""
         try:
             text = self._chat([
-                {"role": "system", "content": SYSTEM + "\n" + user_context()},
+                {"role": "system", "content": SYSTEM + "\n" + self._context()},
                 {"role": "user", "content":
                  "Ты сама решила ненадолго появиться на экране. Скажи одну короткую спонтанную фразу, "
                  f"до пятнадцати слов. Тема: {random.choice(CHATTER_TOPICS)}. "
@@ -336,7 +341,7 @@ class LocalAI:
     def summarize_report(self, report):
         try:
             return self._chat([
-                {"role": "system", "content": SYSTEM + "\n" + user_context()},
+                {"role": "system", "content": SYSTEM + "\n" + self._context()},
                 {"role": "user", "content":
                  "Вот отчёт диагностики моего ПК. Скажи 2–4 предложения: общее состояние, главные "
                  "проблемы и что сделать. Безвредные ошибки вроде DistributedCOM не раздувай.\n\n"

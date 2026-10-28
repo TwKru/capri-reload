@@ -13,6 +13,7 @@ import threading
 import time
 import updater
 from game_mode import fullscreen_app_active
+from personality import Personality
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -69,6 +70,7 @@ DEFAULTS = {
     "router_num_gpu": 0,
     "web_app_lookup": True,
     "auto_game_mode": True,
+    "personality": True,
     "barge_in": True,
     "mic_device": None,
     "chatter": True,
@@ -248,21 +250,27 @@ class Capri(QObject):
     anim = Signal(str)
     roam = Signal()
     stop_motion = Signal()
+    mood_changed = Signal(str)
     hop = Signal()
     move_to = Signal(str)
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.personality = Personality(enabled=bool(cfg.get("personality", True)))
+        self._last_mood = None
         words = sorted(cfg["wake_words"], key=len, reverse=True)
         self.wake_re = re.compile(r"(^|\s)(" + "|".join(map(re.escape, words)) + r")(?=\s|$|[,.!?])",
                                   re.IGNORECASE)
         self.ai = AI(cfg)
+        self.ai.personality = self.personality
         self.local = LocalAI(cfg) if cfg.get("local_ai") else None
         self.router = IntentRouter(cfg) if cfg.get("intent_router", True) else None
         if self.local:
             self.local.on_model_change = self._remember_model
+            self.local.personality = self.personality
         self.actions = Actions(cfg, BASE, self.ai, save=save_entry)
+        self.actions.personality = self.personality
         self.config_mtime = self._config_mtime()
         self.zapret_checked = False  # предлагали ли уже исправить zapret в этом сеансе
         self.actions.local = self.local
@@ -350,8 +358,21 @@ class Capri(QObject):
         звучат сразу, без ожидания сервера Microsoft."""
         time.sleep(30)
         static = [gendered(t) for variants in LINES.values() for t in variants if "{" not in t]
+        static = self.personality.prewarm_phrases() + static
         static += list(self.cfg.get("replies", {}).values())
         self.speaker.prewarm(static)
+
+    def sync_personality(self):
+        self.personality.enabled = bool(self.cfg.get("personality", True))
+        mood = self.personality.mood
+        if mood != self._last_mood:
+            self._last_mood = mood
+            self.mood_changed.emit(mood)
+
+    def set_personality(self, enabled):
+        self.cfg["personality"] = bool(enabled)
+        save_setting("personality", bool(enabled))
+        self.sync_personality()
 
     # ----- спонтанные появления -----
     def _chatter_loop(self):
@@ -381,6 +402,8 @@ class Capri(QObject):
             text = line("chatter_night")
         elif 6 <= hour < 11 and random.random() < 0.3:
             text = line("chatter_morning")
+        elif self.personality.enabled:
+            text = self.personality.chatter_line()
         elif self.local and random.random() < 0.4:
             text = self.local.chatter()
         for _ in range(5):
@@ -548,8 +571,9 @@ class Capri(QObject):
             return
         self.config_mtime = mtime
         for key in ("sites", "apps", "app_aliases", "search_when_unsure", "browser", "chatter", "replies",
-                    "user_name_mode", "user_name", "user_gender"):
+                    "user_name_mode", "user_name", "user_gender", "personality"):
             self.cfg[key] = fresh[key]
+        self.sync_personality()
         self.actions.set_lists(self.cfg)
         apply_user(self.cfg)
         log.info("config.json перечитан")
@@ -776,6 +800,7 @@ class Capri(QObject):
             return
 
         reply = self.actions.handle(cmd)
+        self.sync_personality()
         if cancelled():
             return
         if self.router and (reply is None or reply.action == "unresolved"):
@@ -913,7 +938,9 @@ def main():
     avatar.hide_after = float(cfg["hide_after_seconds"])
     apply_user(cfg)
     capri = Capri(cfg)
+    capri.mood_changed.connect(avatar.set_mood)
     def refresh_game_mode():
+        capri.sync_personality()
         active = bool(capri.cfg.get("auto_game_mode", True) and fullscreen_app_active())
         avatar.set_game_mode(active)
         capri.set_game_mode(active)
@@ -1057,9 +1084,14 @@ def main():
             chatter_act.toggled.connect(capri.set_chatter)
             menu.addAction(chatter_act)
 
-            def sync_search(a=search_act, b=chatter_act):
+            personality_act = QAction("Характер и настроение", menu)
+            personality_act.setCheckable(True)
+            personality_act.toggled.connect(capri.set_personality)
+            menu.addAction(personality_act)
+
+            def sync_search(a=search_act, b=chatter_act, c=personality_act):
                 capri.reload_config_if_changed(speak=False)  # могли поменять в config.json руками
-                for act, key, default in ((a, "search_when_unsure", True), (b, "chatter", True)):
+                for act, key, default in ((a, "search_when_unsure", True), (b, "chatter", True), (c, "personality", True)):
                     act.blockSignals(True)
                     act.setChecked(bool(capri.cfg.get(key, default)))
                     act.blockSignals(False)

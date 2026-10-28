@@ -1008,6 +1008,7 @@ class Actions:
         self.browser_once = None  # браузер, названный в текущей команде («открой ютуб в хроме»)
         self.set_lists(cfg)
         self.program_lookup = ProgramLookup() if cfg.get("web_app_lookup", False) else None
+        self.personality = None
         self.index = AppIndex()
         threading.Thread(target=self.index.build, daemon=True).start()
         self.pending = None
@@ -1143,6 +1144,8 @@ class Actions:
         """Однозначная короткая команда Vosk: повторное распознавание в интернете не нужно.
         Проверка ничего не выполняет; свободный текст, поиск и опасные действия сюда не входят."""
         c = norm(cmd)
+        if self.personality and self.personality.enabled and self.personality.can_handle(cmd):
+            return True
         if re.fullmatch(r"походи|походить|ходи|погуляй|прогуляйся|пройдись|покрутись|покружись|крутись|повернись", c):
             return True
         if len(c.split()) > 10:
@@ -1236,6 +1239,8 @@ class Actions:
         if self.stop_background():  # любая новая команда останавливает автопрокрутку
             if re.match(r"^(стоп|хватит|стой|остановись|достаточно|перестань|харэ|все|всё)\b", c):
                 return Reply(line("scroll_stop"))
+        if self.choice and self.personality and self.personality.enabled and self.personality.can_handle(cmd):
+            self.choice = None  # социальную реплику не считаем нечётким выбором программы
         if self.choice:  # ждём ответ на «какое открыть / закрыть?»
             options, self.choice = self.choice, None
             pick = self.resolve_choice(c, options)
@@ -1251,6 +1256,11 @@ class Actions:
         custom = self.custom_reply(c)  # своя фраза целиком — не делим её на цепочку команд
         if custom:
             return custom
+        if self.personality:
+            reaction = self.personality.react(cmd)
+            if reaction.reply:
+                return Reply(reaction.reply, "personality")
+            c = norm(reaction.command)
         # «запомни … как X и Y» — название целиком, не цепочка команд
         whole = any(re.match(p, c) for p in (REMEMBER_RE, FORGET_RE, REPLY_RE, FORGET_REPLY_RE))
         steps = None if whole else automation.split_chain(c)
@@ -1448,20 +1458,23 @@ class Actions:
         return Reply(line("unknown"))
 
     # --- команды ---
+    def _character_line(self, key, default):
+        return self.personality.command_line(key, default) if self.personality else default
+
     def quit(self, c, m):
         return Reply(line("quit"), "quit")
 
     def hide(self, c, m):
-        return Reply(line("hide"), "hide")
+        return Reply(self._character_line("hide", line("hide")), "hide")
 
     def wave(self, c, m):
-        return Reply(line("wave"), "wave")
+        return Reply(self._character_line("wave", line("wave")), "wave")
 
     def roam(self, c, m):
-        return Reply(line("roam"), "roam")
+        return Reply(self._character_line("roam", line("roam")), "roam")
 
     def spin(self, c, m):
-        return Reply("Смотри, полный оборот!", "anim:spin")
+        return Reply(self._character_line("spin", "Смотри, полный оборот!"), "anim:spin")
 
     # --- прокрутка ---
     def scroll(self, c, m):

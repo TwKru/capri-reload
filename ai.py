@@ -20,6 +20,7 @@ class AI:
         self.model = cfg.get("model", "claude-opus-5-5")
         self.history = []
         self.client = None
+        self.personality = None
         key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
         if key:
             import anthropic
@@ -28,6 +29,10 @@ class AI:
     @property
     def available(self):
         return self.client is not None
+
+    def _context(self):
+        mood = self.personality.context() if self.personality else ""
+        return user_context() + ("\n" + mood if mood else "")
 
     def _call(self, system, messages, tools):
         """Запрос с серверным фолбэком при отказе и продолжением при pause_turn."""
@@ -64,7 +69,7 @@ class AI:
         while self.history and self.history[0]["role"] != "user":
             self.history.pop(0)
         try:
-            answer = self._call(SYSTEM + "\n" + user_context(), self.history,
+            answer = self._call(SYSTEM + "\n" + self._context(), self.history,
                                 [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}])
         except anthropic.AuthenticationError:
             self.history.pop()
@@ -87,7 +92,7 @@ class AI:
             return None
         try:
             return self._call(
-                SYSTEM + "\n" + user_context(),
+                SYSTEM + "\n" + self._context(),
                 [{"role": "user", "content":
                   "Вот отчёт диагностики моего ПК. Скажи голосом 2–4 предложения: общее состояние, "
                   "главные проблемы и что конкретно сделать. Ошибки, которые обычно безвредны "

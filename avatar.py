@@ -558,6 +558,7 @@ class Avatar(QWidget):
         scan.end()
         self.state = "hidden"       # hidden / appearing / visible / vanishing
         self.mode = "idle"           # idle / listening / thinking / speaking
+        self.mood = "neutral"
         self.mode_until = 0.0
         self.hide_at = 0.0
         self.hide_after = 12.0
@@ -763,6 +764,13 @@ class Avatar(QWidget):
 
     def set_subtitle(self, text):
         self.subtitle = text or ""
+
+    def set_mood(self, mood):
+        if mood not in ("neutral", "hurt", "happy", "playful", "bored"):
+            mood = "neutral"
+        self.mood = mood
+        if self.isVisible():
+            self.update()
 
     # ---------- анимация ----------
     def tick(self):
@@ -1005,8 +1013,11 @@ class Avatar(QWidget):
         font = QFont("Consolas", 10)
         font.setBold(True)
         p.setFont(font)
-        status = "// CAPRI :: " + STATUS_TEXT.get(self.mode, "")
-        p.setPen(GREEN)
+        label = STATUS_TEXT.get(self.mode, "")
+        if self.mode == "idle":
+            label = {"hurt": "ОБИЖЕНА", "happy": "ДОВОЛЬНА", "playful": "ШАЛЮ", "bored": "СКУЧАЮ"}.get(self.mood, label)
+        status = "// CAPRI :: " + label
+        p.setPen({"hurt": PURPLE, "happy": GREEN, "playful": PINK, "bored": CYAN}.get(self.mood, GREEN))
         p.drawText(16, top + 20, status)
 
         # «эквалайзер»
