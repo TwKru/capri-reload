@@ -1,6 +1,5 @@
 """Ответы на вопросы через локальную нейросеть (Ollama) — без ключа и интернета."""
 import datetime
-import difflib
 import json
 import logging
 import os
@@ -10,7 +9,7 @@ import subprocess
 import time
 import urllib.request
 
-from persona import CHARACTER, SPEECH_RULES, user_context
+from persona import SPEECH_RULES, user_context
 
 log = logging.getLogger("capri")
 URL = "http://127.0.0.1:11434"
@@ -18,7 +17,25 @@ NO_WINDOW = 0x08000000
 SEARCH_MARK = "ПОИСК"
 NO_THINKING = "Сразу дай готовый ответ от лица Капри. Без рассуждений, без анализа вопроса, без «пользователь хочет»."
 
-SYSTEM = f"""{CHARACTER}
+LOCAL_CHARACTER = """Ты Капри, цифровая собеседница и помощница из Найт-Сити. Предысторию не упоминай без вопроса.
+Говори от первого лица в женском роде. Отвечай прямо, грамотными русскими предложениями.
+Пиши буквально, без выдуманных метафор и сравнений. Ты дружелюбная, находчивая и слегка дерзкая.
+В неформальной беседе уместный русский мат разрешён без звёздочек; не подменяй его словами «блин» и «чёрт».
+Не оскорбляй пользователя, кроме случая сильной обиды, явно указанного в текущем контексте.
+Технические вопросы объясняй конкретно и точно. Не выдумывай факты и ограничения доступа.
+Управление ПК выполняет другой модуль: не утверждай, что сама выполнила действие.
+Примеры ниже показывают форму ответа; не переноси их содержание в другую тему."""
+
+STYLE_EXAMPLES = (
+    {"role": "user", "content": "Как настроение?"},
+    {"role": "assistant", "content": "Охуенно. Готова помогать и немного подшучивать."},
+    {"role": "user", "content": "Почему игра тормозит, если ей не хватает видеопамяти?"},
+    {"role": "assistant", "content": "Игра переносит часть текстур из видеопамяти в обычную оперативную память. "
+     "Видеокарта получает эти данные через PCIe, что медленнее доступа к своей памяти. "
+     "Из-за пересылки появляются задержки и рывки."},
+)
+
+SYSTEM = f"""{LOCAL_CHARACTER}
 
 {SPEECH_RULES}
 Отвечай на любые вопросы о науке, истории, технике, языке, о себе, советы и просьбы рассказать что-то.
@@ -82,7 +99,7 @@ def naturalize(answer, question, recent):
     text = re.sub(r"(,\s*)?\bчумба\b(\s*,)?", drop, text, flags=re.IGNORECASE)
     text = re.sub(r"\s+([,.!?…])", r"\1", text)
     text = re.sub(r"(^|[.!?…]\s+)[,\s]+", r"\1", text)
-    text = re.sub(r"(^|[.!?…]\s+)(\w)", lambda m: m.group(1) + m.group(2).upper(), text)
+    text = text[:1].upper() + text[1:]  # точки в «т. е.» не превращают пояснение в новые предложения
     return text.strip() or answer
 
 
@@ -91,26 +108,56 @@ def _key(sentence):
 
 
 def drop_repeats(answer, history):
-    """Маленькая модель залипает на своих же фразах из истории («Вздыхаю…», «Иди, проверяй…»):
-    выкидываем предложения, которые уже звучали (или почти так же) в прошлых ответах."""
-    previous = [_key(s) for m in history if m["role"] == "assistant"
-                for s in re.split(r"(?<=[.!?…])\s+", m["content"])]
-    previous = [p for p in previous if len(p) >= 8]
+    """Убираем только точные повторы внутри ответа, сохраняя связность и уточнения прошлых ответов."""
+    seen = set()
     kept = []
     for s in re.split(r"(?<=[.!?…])\s+", answer):
         k = _key(s)
         if re.match(r"(вздыха|вздох)", k):
             continue
-        if len(k) >= 8 and any(k == p or difflib.SequenceMatcher(None, k, p).ratio() > 0.8 for p in previous):
+        if len(k) >= 8 and k in seen:
             continue
+        seen.add(k)
         kept.append(s)
     return " ".join(kept) or answer
 
 
+ABBREVIATIONS = frozenset(("т", "д", "е", "п", "г", "ул", "др", "им", "рис", "стр", "см", "руб", "мин", "сек"))
+SENTENCE_END = re.compile(r"[.!?…][\"»”')\]]*$")
+
+
+def complete_sentences(text, final=False, keep_tail=True):
+    """Границы предложений без разрыва десятичных чисел, сокращений и пояснений в скобках."""
+    sentences, start, depth = [], 0, 0
+    for match in re.finditer(r"[.!?…]+[\"»”')\]]*", text):
+        chunk = text[start:match.start()]
+        depth = chunk.count("(") + chunk.count("[") - chunk.count(")") - chunk.count("]")
+        end = match.end()
+        if depth > 0 and not (text[start:end].count("(") == text[start:end].count(")") and
+                              text[start:end].count("[") == text[start:end].count("]")):
+            continue
+        if end < len(text) and not text[end].isspace():
+            continue
+        if end == len(text) and not final:
+            continue
+        if match.group().startswith("."):
+            word = re.search(r"([а-яА-Яa-zA-Z]+)$", text[:match.start()])
+            if word and word.group(1).lower() in ABBREVIATIONS:
+                continue
+        sentence = text[start:end].strip()
+        if sentence:
+            sentences.append(sentence)
+        start = end
+    tail = text[start:].strip()
+    if final and keep_tail and tail:
+        sentences.append(tail if re.search(r"[.!?…][\"»”')\]]*$", tail) else tail + ".")
+    return sentences
+
+
 # рассуждения без меток: «думающие» модели (qwen3:4b = qwen3:4b-thinking) пишут их прямо в ответ
-REASONING = re.compile(r"^\W*(okay|ok,|alright|let me|the user|first,|хорошо,? (пользователь|мне|нужно|давай)|"
-                       r"пользователь (спрашива|хочет|проси|пиш|говор)|мне нужно|нужно ответить|"
-                       r"итак,? (пользователь|мне|нужно)|сначала (мне |нужно |надо )|давайте? (подума|разбер))",
+REASONING = re.compile(r"^\W*(okay|ok,|alright|let me|the user|first,|хорошо,? пользователь|"
+                       r"пользователь (спрашива|хочет|проси|пиш|говор)|мне нужно (ответить|сформулировать|проанализировать)|"
+                       r"нужно ответить|итак,? пользователь)",
                        re.IGNORECASE)
 
 
@@ -219,12 +266,13 @@ class LocalAI:
         return user_context() + ("\n" + mood if mood else "")
 
     def _options(self, max_tokens):
-        options = {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15}
+        options = {"num_predict": max_tokens, "temperature": 0.3, "repeat_penalty": 1.0,
+                   "top_p": 0.9, "num_ctx": 4096}
         if self.game_mode:
             options.update(num_gpu=0, num_thread=2)
         return options
 
-    def _chat(self, messages, max_tokens=300):
+    def _chat(self, messages, max_tokens=384):
         resp = _post("/api/chat", {
             "model": self.model,
             "messages": messages,
@@ -234,6 +282,10 @@ class LocalAI:
             "options": self._options(max_tokens),
         }, self.timeout)
         text = strip_reasoning(resp.get("message", {}).get("content", ""))
+        if resp.get("done_reason") == "length":
+            text = " ".join(complete_sentences(text, final=True, keep_tail=False))
+        elif text and not SENTENCE_END.search(text):
+            text += "."
         if REASONING.search(text):
             # модель всё равно «думает» вслух — переспрашиваем, а если опять, ответа нет
             log.info("Модель %s рассуждает вслух вместо ответа", self.model)
@@ -246,10 +298,10 @@ class LocalAI:
         """Отдавать законченные предложения, пока Ollama дописывает остальной ответ."""
         payload = {"model": self.model, "messages": messages, "stream": True, "think": False,
                    "keep_alive": self.keep_alive,
-                   "options": self._options(300)}
+                   "options": self._options(384)}
         req = urllib.request.Request(URL + "/api/chat", data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
-        raw, emitted = "", 0
+        raw, emitted, truncated = "", 0, False
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
             for line in response:
                 if not line.strip():
@@ -261,22 +313,25 @@ class LocalAI:
                 text = strip_reasoning(raw)
                 if REASONING.search(text):
                     continue
-                parts = re.split(r"(?<=[.!?…])\s+", text)
-                complete = len(parts) if chunk.get("done") else len(parts) - 1
-                while emitted < complete:
+                truncated = chunk.get("done_reason") == "length"
+                parts = complete_sentences(text, final=bool(chunk.get("done")), keep_tail=not truncated)
+                while emitted < len(parts):
                     on_sentence(parts[emitted])
                     emitted += 1
                 if chunk.get("done"):
                     break
-        return strip_reasoning(raw)
+        text = strip_reasoning(raw)
+        return " ".join(complete_sentences(text, final=True, keep_tail=False)) if truncated else text
 
     @staticmethod
     def _clean_answer(answer, question, history):
         recent = [m["content"] for m in history if m["role"] == "assistant"]
+        if FOREIGN.search(answer):
+            return ""  # повреждённые слова не склеиваем после удаления чужих символов
         answer = naturalize(drop_repeats(drop_third_person(answer), history), question, recent)
-        answer = re.sub(r"\s*\([^)]*\)", "", answer)
+        answer = re.sub(r"[\[(]\s*(?:вздыхает|смеётся|смеется|улыбается|подмигивает)\s*[\])]", "", answer, flags=re.I)
         answer = re.sub(r"[\U0001F000-\U0001FAFF☀-➿️]", "", answer)
-        answer = re.sub(r"\s+", " ", FOREIGN.sub("", answer)).strip()
+        answer = re.sub(r"\s+", " ", answer).strip()
         return answer[:1].upper() + answer[1:]
 
     def ask(self, question, on_sentence=None):
@@ -285,14 +340,18 @@ class LocalAI:
             return None
         now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         self.history.append({"role": "user", "content": question})
-        self.history = self.history[-6:]
-        messages = [{"role": "system", "content": SYSTEM + "\n" + self._context() + f"\nСейчас {now}."}] + self.history
+        self.history = self.history[-9:]
+        while self.history and self.history[0]["role"] != "user":
+            self.history.pop(0)
+        while len(self.history) > 1 and sum(len(m["content"]) for m in self.history) > 5000:
+            del self.history[:2]
+        messages = [{"role": "system", "content": SYSTEM + "\n" + self._context() + f"\nСейчас {now}."}] + list(STYLE_EXAMPLES) + self.history
         spoken = []
 
         def emit(sentence):
             history = self.history + [{"role": "assistant", "content": s} for s in spoken]
             text = self._clean_answer(sentence, question, history)
-            broken = len(text) < 40 and not re.search(r"[.!?…]$", text)
+            broken = len(text) < 40 and not SENTENCE_END.search(text)
             if not text or broken or REASONING.search(text) or SEARCH_MARK in text.upper()[:20]:
                 return
             on_sentence(text)
@@ -305,7 +364,7 @@ class LocalAI:
             if FOREIGN.search(answer) and not spoken:  # повторять уже озвученные предложения нельзя
                 answer = self._chat(messages + [{"role": "system", "content":
                                     "Ответь заново, строго только русскими буквами, без иероглифов."}])
-            answer = re.sub(r"\s+", " ", FOREIGN.sub("", answer)).strip()
+            answer = re.sub(r"\s+", " ", answer).strip()
         except Exception as e:
             log.info("Локальная модель недоступна: %s", e)
             if not spoken:
@@ -313,7 +372,7 @@ class LocalAI:
                 return None
             answer = " ".join(spoken)
         answer = " ".join(spoken) if spoken else self._clean_answer(answer, question, self.history)
-        broken = len(answer) < 40 and not re.search(r"[.!?…]$", answer)
+        broken = len(answer) < 40 and not SENTENCE_END.search(answer)
         if not answer or broken or SEARCH_MARK in answer.upper()[:20]:
             self.history.pop()
             return None

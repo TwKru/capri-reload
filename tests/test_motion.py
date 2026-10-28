@@ -86,12 +86,15 @@ class MotionTests(unittest.TestCase):
     def test_direct_motion_commands_do_not_need_ai(self):
         with patch("actions.AppIndex.build"):
             actions = Actions({}, ".", None)
-        for command in ("походи", "походить", "ходи", "погуляй", "пройдись"):
+        for command in ("походи", "походить", "ходи", "погуляй", "погулять", "пройдись", "пройтись"):
             with self.subTest(command=command):
                 self.assertEqual(actions.handle(command).action, "roam")
                 self.assertTrue(actions.is_fast_command(command))
         for command in ("покрутись", "покружись", "повернись"):
             self.assertEqual(actions.handle(command).action, "anim:spin")
+        for source, expected in (("по крутись", "покрутись"), ("погулять", "погуляй")):
+            self.assertEqual(actions.normalize_voice_command(source), expected)
+            self.assertTrue(actions.is_fast_command(expected))
 
 
 if __name__ == "__main__":

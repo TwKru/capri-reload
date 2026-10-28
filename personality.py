@@ -124,6 +124,7 @@ class Personality:
         self._mood, self._until, self._strikes = "neutral", 0.0, 0
         self.last_interaction = self.clock()
         self._last_reply = {}
+        self._casual_turn = 0
         if enabled and persist:
             self._load()
 
@@ -174,7 +175,7 @@ class Personality:
             return ""
         if self.strongly_hurt:
             return MOOD_CONTEXT["hurt"] + "\n" + ANGRY_CONTEXT
-        return MOOD_CONTEXT[self.mood] + "\nКрепкий мат сейчас запрещён: сильной обиды нет. Отвечай без мата."
+        return MOOD_CONTEXT[self.mood] + "\nДопустим редкий разговорный мат без оскорблений пользователя. Жёстких личных наездов сейчас не допускай."
 
     @property
     def strongly_hurt(self):
@@ -183,7 +184,12 @@ class Personality:
     def command_line(self, key, default):
         if self.strongly_hurt:
             return ANGRY_COMMAND_LINES.get(key, default)
-        return COMMAND_LINES.get(self.mood, {}).get(key, default) if self.enabled else default
+        text = COMMAND_LINES.get(self.mood, {}).get(key, default) if self.enabled else default
+        if text != default and self.enabled:
+            self._casual_turn += 1
+            if self._casual_turn % 2 == 0:
+                text += " Блядь, погнали."
+        return text
 
     def prewarm_phrases(self):
         if not self.enabled:

@@ -1027,7 +1027,7 @@ class Actions:
             (REPLY_RE, self.reply_cmd),
             (FORGET_REPLY_RE, self.forget_reply_cmd),
             (r"помаши|помахай|махни|помаши ручкой|поздоровайся", self.wave),
-            (r"\b(походи|походить|ходи|погуляй|прогуляйся|пройдись)\b|прогулк", self.roam),
+            (r"\b(походи|походить|ходи|погуляй|погулять|прогуляйся|прогуляться|пройдись|пройтись)\b|прогулк", self.roam),
             (r"\b(покрутись|покружись|крутись|повертись|повернись)\b|сделай (оборот|поворот)", self.spin),
             (r"что ты (умеешь|можешь)|как\w* (у тебя )?команд|(назови|перечисли|скажи) (\S+ )?команд|"
              r"список команд|помощь$", self.help),
@@ -1129,7 +1129,12 @@ class Actions:
     @staticmethod
     def normalize_voice_command(cmd):
         """Vosk путает заимствованное «некст» с «текст». Поправка только для короткой команды плееру."""
-        if norm(cmd) not in ("текст", "текст трек"):
+        short = norm(cmd)
+        motion = {"по крутись": "покрутись", "покрутиться": "покрутись", "по ходи": "походи",
+                  "погулять": "погуляй", "прогуляться": "прогуляйся", "пройтись": "пройдись"}
+        if short in motion:
+            return motion[short]
+        if short not in ("текст", "текст трек"):
             return cmd
         try:
             player = media.now_playing()
@@ -1146,7 +1151,7 @@ class Actions:
         c = norm(cmd)
         if self.personality and self.personality.enabled and self.personality.can_handle(cmd):
             return True
-        if re.fullmatch(r"походи|походить|ходи|погуляй|прогуляйся|пройдись|покрутись|покружись|крутись|повернись", c):
+        if re.fullmatch(r"походи|походить|ходи|погуляй|погулять|прогуляйся|прогуляться|пройдись|пройтись|покрутись|покружись|крутись|повернись", c):
             return True
         if len(c.split()) > 10:
             return False
