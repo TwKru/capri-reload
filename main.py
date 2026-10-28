@@ -66,6 +66,7 @@ DEFAULTS = {
     "router_model": "qwen3:0.6b",
     "router_timeout_seconds": 2.5,
     "router_num_gpu": 0,
+    "web_app_lookup": True,
     "barge_in": True,
     "mic_device": None,
     "chatter": True,

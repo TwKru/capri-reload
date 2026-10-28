@@ -20,6 +20,7 @@ import psutil
 import automation
 import gamma
 import updater
+from program_lookup import AmbiguousProgram, ProgramLookup, is_abbreviation, name_key, same_program, steam_games
 import media
 from persona import line
 
@@ -210,7 +211,7 @@ BROWSER_NAMES = {"chrome": "Google Chrome", "yandex": "Яндекс Браузе
 BROWSER_SUFFIX = re.compile(r"\s+(в|через)\s+(браузер\w*\s+)?(?P<b>" + "|".join(p for p, _ in BROWSER_WORDS)
                             + r")(\s+браузер\w*)?$")
 VOLUME_RE = (r"громкост|громче|тише|(вкл|выкл|отключ|убер|верни|включ|убав|прибав|уменьш|увелич|пониз|повыс)"
-             r"\w* звук|звук (на|в) |без звука|замуть")
+             r"\w* звук|звук (на|в) |без звука|\b(замуть|замути|мутни|размуть|размути|приглуши)\b")
 AUDIO_ALIASES = {"дискорд": "discord", "телеграм": "telegram", "телеграмм": "telegram",
                  "телега": "telegram", "стим": "steam", "спотифай": "spotify", "ватсап": "whatsapp",
                  "зум": "zoom", "обс": "obs64", "влс": "vlc", "влц": "vlc"}
@@ -330,6 +331,8 @@ class AppIndex:
         for name, exe in installed_programs():
             if name not in items and not any(w in name for w in SKIP_WORDS):
                 items[name] = ("file", exe)
+        for name, uri in steam_games():
+            items.setdefault(norm(name), ("file", uri))
         with self.lock:
             self.items = items
         self.ready.set()
@@ -1001,6 +1004,7 @@ class Actions:
         self.save = save  # save(раздел, название, значение или None) → текст ошибки или None
         self.browser_once = None  # браузер, названный в текущей команде («открой ютуб в хроме»)
         self.set_lists(cfg)
+        self.program_lookup = ProgramLookup() if cfg.get("web_app_lookup", False) else None
         self.index = AppIndex()
         threading.Thread(target=self.index.build, daemon=True).start()
         self.pending = None
@@ -1795,6 +1799,7 @@ class Actions:
         return Reply(line("lock"))
 
     def volume(self, c, m):
+        self._resolved_audio_name = None
         target, operation = self._volume_request(c)
         if target.lower() == "browser":
             target = "браузер"
@@ -1820,23 +1825,42 @@ class Actions:
                                          lambda on, v=v: v.SetMute(on, None)) for v in volumes]
             return Reply("Браузер: " + replies[-1].text)
         if target:
-            volumes = self._program_volumes(target)
+            try:
+                volumes = self._program_volumes(target)
+            except AmbiguousProgram as error:
+                return Reply("Под это сокращение подходят: " + ", ".join(error.names[:4]) +
+                             ". Назови нужную программу полным названием.")
             if not volumes:
                 return Reply(f"Не нашла звуковую сессию «{target}». Включи звук в этой программе и повтори команду.",
                              "unresolved")
             replies = [self._change_volume(operation, lambda v=v: round(v.GetMasterVolume() * 100),
                                          lambda n, v=v: self._set_session_volume(v, n),
                                          lambda on, v=v: v.SetMute(on, None)) for v in volumes]
-            return Reply(target.capitalize() + ": " + replies[-1].text)
+            return Reply((self._resolved_audio_name or target.capitalize()) + ": " + replies[-1].text)
         return self._change_volume(operation, get_volume, set_volume, set_mute)
 
     @staticmethod
     def _volume_request(c):
         """Отделить название программы от действия и числа (в названии тоже бывают цифры)."""
         target = re.sub(r"^(сделай|поставь|установи|выставь|измени|поменяй|убавь|прибавь|уменьши|увеличь|"
-                        r"понизь|повысь|выключи|включи|отключи|убери|верни|замуть)\s+", "", c)
+                        r"понизь|повысь|выключи|включи|отключи|убери|верни|замуть|замути|мутни|размуть|размути|приглуши)\s+", "", c)
         target = re.sub(r"\b(громкость|звук|погромче|потише|громче|тише|без звука)\b", " ", target)
         target = re.sub(r"\s+", " ", target).strip()
+        target = re.sub(r"^(какая|какой|какую|сколько|текущая|текущую)\s*", "", target)
+        target = re.sub(r"^(в|у|для)\s+", "", target)
+        target = re.sub(r"^(программ\w*|приложени\w*|игр\w*)\s+(?!(?:" + "|".join(NUM) +
+                        r")\b)(?=[a-zа-я])", "", target)
+        # Название «кс два» / «cs 2» не должно превращаться в установку громкости 2.
+        digits = {"ноль": 0, "один": 1, "два": 2, "три": 3, "четыре": 4, "пять": 5,
+                  "шесть": 6, "семь": 7, "восемь": 8, "девять": 9}
+        def join_identifier(match):
+            letters = match.group("letters")
+            if letters in ("на", "до", "для", "звук") or letters in AUDIO_ALIASES or letters in AUDIO_ALIASES.values():
+                return match.group(0)
+            value = match.group("number")
+            return (match.group("pre") or "") + letters.replace(" ", "") + str(digits.get(value, value))
+        target = re.sub(r"^(?P<pre>(?:в|у|для)\s+)?(?P<letters>[a-zа-я]{1,3}|(?:[a-zа-я]\s+){1,3}[a-zа-я])"
+                        r"\s+(?P<number>\d|" + "|".join(digits) + r")(?=\s|$)", join_identifier, target)
         target = re.sub(r"\b(можешь|пожалуйста|немного|немножко|немножечко|чуть|чуток|мне|сделать|сделай|"
                         r"поставить|поставь|давай)\b", " ", target)
         target = re.sub(r"\s+", " ", target).strip()
@@ -1844,6 +1868,10 @@ class Actions:
         amount = rf"{numbers}(?:\s+{numbers})*(?:\s+процент\w*)?"
         leading = re.fullmatch(rf"(?:на |до )?(?P<n>{amount})\s+(?:в|у|для)\s+(?P<t>.+)", target)
         trailing = re.search(rf"(?:^|\s)(?:(?:на|до)\s+)?(?P<n>{amount})$", target)
+        mute_command = re.search(r"(выключи|отключи|убери|включи|верни)\w* звук|без звука|"
+                                 r"\b(замуть|замути|мутни|размуть|размути)\b", c)
+        if mute_command:
+            leading, trailing = None, None
         value = ""
         if leading:
             value, target = leading.group("n"), leading.group("t")
@@ -1857,13 +1885,13 @@ class Actions:
         if target in ("", "общая", "общую", "системная", "системную", "системы", "компьютера",
                       "компьютере", "windows", "на полную", "на всю"):
             target = ""
-        if re.search(r"(выключи|отключи|убери)\w* звук|без звука|замуть", c):
+        if re.search(r"(выключи|отключи|убери)\w* звук|без звука|\b(замуть|замути|мутни)\b", c):
             operation = "выключи звук"
-        elif re.search(r"(включи|верни)\w* звук", c) and not value:
+        elif re.search(r"(включи|верни)\w* звук|\b(размуть|размути)\b", c) and not value:
             operation = "включи звук"
         else:
             direction = "громкость" if re.search(r"\bдо\s", c) else "громче" if re.search(r"громче|прибав|увелич|повыс|выше", c) else (
-                "тише" if re.search(r"тише|убав|уменьш|пониз|ниже", c) else "громкость")
+                "тише" if re.search(r"тише|убав|уменьш|пониз|ниже|приглуш", c) else "громкость")
             operation = direction + " " + value
         return target, operation.strip()
 
@@ -1887,6 +1915,10 @@ class Actions:
         for text in (self._audio_name(original), self._audio_name(translit(original))):
             if any(key and re.search(r"(^|\s)" + re.escape(key) + r"(\s|$)", text) for key in keys):
                 return True
+        if self.program_lookup:
+            abbreviation, _ = self._volume_request(norm(original))
+            if is_abbreviation(abbreviation):
+                return any(same_program(target, name) for name in self.program_lookup.resolve(abbreviation))
         return False
 
     def _program_volumes(self, target):
@@ -1904,23 +1936,50 @@ class Actions:
         if "steam" in variants:
             variants.add("steamwebhelper")
         volumes = []
+        records = []
         for session in AudioUtilities.GetAllSessions():
             try:
                 process = session.Process
                 if not process:
                     continue
                 labels = [os.path.splitext(process.name())[0], getattr(session, "DisplayName", "")]
-                matched = any(isinstance(label, str) and self._audio_name(label) in variants for label in labels)
+                matched = any(isinstance(label, str) and (self._audio_name(label) in variants or
+                              any(same_program(label, variant) for variant in variants)) for label in labels)
                 if not matched:
                     try:
-                        matched = self._audio_name(file_description(process.exe())) in variants
+                        description = file_description(process.exe())
+                        labels.append(description)
+                        matched = (self._audio_name(description) in variants or
+                                   any(same_program(description, variant) for variant in variants))
                     except (AttributeError, psutil.Error, OSError):
                         pass
                 if matched:
                     volumes.append(session.SimpleAudioVolume)
+                records.append((session, [label for label in labels if isinstance(label, str) and label]))
             except (psutil.Error, OSError):
                 continue
-        return volumes
+        if volumes or self.program_lookup is None:
+            return volumes
+        names = self.program_lookup.resolve(target)
+        matches = {}
+        for name in names:
+            found = [session for session, labels in records if any(same_program(label, name) for label in labels)]
+            if found:
+                matches.setdefault(name_key(name), (name, found))
+        if len(matches) > 1:
+            raise AmbiguousProgram([name for name, _ in matches.values()])
+        if matches:
+            self._resolved_audio_name, sessions = next(iter(matches.values()))
+            return [session.SimpleAudioVolume for session in sessions]
+        return []
+
+    def _web_program_options(self, query):
+        if self.program_lookup is None:
+            return []
+        names = self.program_lookup.resolve(query)
+        with self.index.lock:
+            items = list(self.index.items.items())
+        return [(1.0, name, target) for name, target in items if any(same_program(name, full) for full in names)]
 
     @staticmethod
     def _set_session_volume(volume, value):
@@ -2069,11 +2128,17 @@ class Actions:
         if not site_mode:
             self.index.ready.wait(timeout=8)
             options = self.index.candidates(t, self.aliases)
+            if self.program_lookup and is_abbreviation(t) and (not options or options[0][0] < 0.9):
+                resolved = self._web_program_options(t)
+                if resolved:
+                    options = resolved
+                elif options and options[0][0] < 0.9:
+                    options = []
             if not options:
                 return Reply(line("app_missing", t=t))
             top = options[0]
             close = [o for o in options[1:] if top[0] - o[0] < 0.1]
-            if top[0] >= 1.0 or not close:  # одно явно подходит — запускаем
+            if not close or (top[0] >= 1.0 and close[0][0] < 1.0):  # при нескольких точных совпадениях уточняем
                 started = self.index.launch_best(t, [top])
                 return Reply(line("launch", t=started) if started else line("app_missing", t=t))
             # несколько похожих — спрашиваем, какое открыть
@@ -2115,11 +2180,13 @@ class Actions:
         words = [w for w in translit(q).split() if len(w) >= 3]  # для сравнения с описанием из диспетчера задач
         me = psutil.Process().username()
         best = {}  # имя процесса → (оценка, [процессы])
+        process_records = []
         for p in psutil.process_iter(["name", "pid", "username", "exe"]):
             name = (p.info["name"] or "").lower().removesuffix(".exe")
             # только свои программы: системные процессы и службы не трогаем никогда
             if not name or name in PROTECTED_PROCS or p.info["username"] != me or p.pid == os.getpid():
                 continue
+            process_records.append((p, name))
             score = 0.0
             for v in variants:
                 if name == v:
@@ -2142,12 +2209,25 @@ class Actions:
             if score >= 0.85:
                 prev = best.get(name, (0.0, []))
                 best[name] = (max(prev[0], score), prev[1] + [p])
+        web_resolved = False
+        if self.program_lookup and is_abbreviation(q) and (not best or max(v[0] for v in best.values()) < 0.95):
+            names = self.program_lookup.resolve(q)
+            resolved = {}
+            for process, name in process_records:
+                description = file_description(process.info["exe"])
+                if any(same_program(name, full) or same_program(description, full) for full in names):
+                    previous = resolved.get(name, (1.0, []))
+                    resolved[name] = (1.0, previous[1] + [process])
+            if resolved:
+                best, web_resolved = resolved, True
+            else:
+                best = {}  # неизвестное сокращение не должно закрывать просто похожий процесс
         if not best:
             return Reply(line("not_running", t=t))
         ranked = sorted(best.items(), key=lambda kv: -kv[1][0])
         top_name, (top_score, _) = ranked[0]
         close = [kv for kv in ranked[1:] if top_score - kv[1][0] < 0.1]
-        if top_score < 1.0 and close:  # несколько похожих — спрашиваем, что закрыть
+        if close and (top_score < 1.0 or web_resolved):  # интернет-расшифровка тоже может быть неоднозначной
             self.choice = [(n, (lambda procs=procs, n=n: self._kill(n, procs, force))) for n, (_, procs) in
                            [ranked[0]] + close[:2]]
             ords = ["первое", "второе", "третье"]
