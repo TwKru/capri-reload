@@ -6,8 +6,12 @@
 Если архива модели нет — скачивает её с сайта разработчиков. Повторный запуск ничего не делает,
 если модель уже на месте."""
 import os
+import hashlib
+from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sys
+import tempfile
 import urllib.request
 import zipfile
 
@@ -17,6 +21,7 @@ URL = f"https://alphacephei.com/vosk/models/{NAME}.zip"
 BUNDLED = os.path.join(BASE, "bundled", NAME + ".zip")  # копия модели в репозитории (лицензия Apache 2.0)
 MODELS = os.path.join(BASE, "models")
 TARGET = os.path.join(MODELS, NAME)
+MODEL_SHA256 = "5525af7834b816319e20996416579b1adf448bf29fba7025cb8014c940468606"
 
 
 def ready():
@@ -30,6 +35,8 @@ def download(path):
         while chunk := r.read(1 << 16):
             f.write(chunk)
             done += len(chunk)
+            if done > 128 * 2**20:
+                raise ValueError("Архив модели слишком большой")
             if total:
                 print(f"\r  {done / 2**20:.0f} / {total / 2**20:.0f} МБ", end="", flush=True)
     print()
@@ -38,9 +45,51 @@ def download(path):
 
 
 def unpack(archive):
-    shutil.rmtree(TARGET, ignore_errors=True)
-    with zipfile.ZipFile(archive) as z:
-        z.extractall(MODELS)
+    with open(archive, "rb") as file:
+        if hashlib.file_digest(file, "sha256").hexdigest() != MODEL_SHA256:
+            raise ValueError("Контрольная сумма модели не совпала")
+    models = Path(MODELS).resolve()
+    target = Path(TARGET)
+    if target.is_symlink() or getattr(target, "is_junction", lambda: False)() or target.resolve() != models / NAME:
+        raise ValueError("Небезопасный путь модели")
+    models.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=models, prefix=".unpack-") as folder:
+        staged = Path(folder)
+        with zipfile.ZipFile(archive) as zipped:
+            total, seen = 0, set()
+            for entry in zipped.infolist():
+                path = PurePosixPath(entry.orig_filename)
+                if (not path.parts or path.parts[0] != NAME or "\\" in entry.orig_filename or
+                        path.is_absolute() or any(part in (".", "..") or ":" in part or
+                        part.endswith((".", " ")) or any(ord(c) < 32 for c in part) or
+                        re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)
+                        for part in path.parts) or (entry.external_attr >> 16) & 0o170000 == 0o120000):
+                    raise ValueError("Недопустимый путь в архиве модели")
+                key = "/".join(path.parts).casefold()
+                if key in seen:
+                    raise ValueError("Повторяющийся путь в архиве модели")
+                seen.add(key)
+                total += entry.file_size
+                if total > 256 * 2**20:
+                    raise ValueError("Распакованная модель слишком большая")
+                if entry.is_dir():
+                    continue
+                output = staged.joinpath(*path.parts)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                with zipped.open(entry) as source, output.open("wb") as dest:
+                    shutil.copyfileobj(source, dest)
+        if not (staged / NAME / "am" / "final.mdl").is_file():
+            raise ValueError("В архиве нет модели распознавания")
+        previous = staged / "previous"
+        existed = target.exists()
+        if existed:
+            target.rename(previous)
+        try:
+            (staged / NAME).rename(target)
+        except Exception:
+            if existed:
+                previous.rename(target)
+            raise
 
 
 def main():
@@ -52,7 +101,7 @@ def main():
         print("[Capri] Распаковываю модель распознавания речи...")
         try:
             unpack(BUNDLED)
-        except (OSError, zipfile.BadZipFile) as e:
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
             print(f"  не получилось ({e}), попробую скачать")
     if not ready():
         tmp = os.path.join(MODELS, "ru.zip")

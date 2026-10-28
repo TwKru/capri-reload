@@ -68,6 +68,7 @@ def extract(archive, destination):
     with zipfile.ZipFile(archive) as zipped:
         total = 0
         roots = set()
+        seen = set()
         for entry in zipped.infolist():
             name = entry.orig_filename
             path = PurePosixPath(name)
@@ -75,6 +76,14 @@ def extract(archive, destination):
                 raise ValueError("Недопустимый путь в обновлении")
             if not path.parts:
                 continue
+            for part in path.parts:
+                if (part.endswith((".", " ")) or any(ord(c) < 32 for c in part) or
+                        re.match(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part, re.I)):
+                    raise ValueError("Недопустимое имя файла Windows в обновлении")
+            key = "/".join(path.parts).casefold()
+            if key in seen:
+                raise ValueError("Повторяющийся путь в обновлении")
+            seen.add(key)
             roots.add(path.parts[0])
             if len(roots) != 1:
                 raise ValueError("Неизвестная структура архива")
@@ -117,6 +126,8 @@ def changed_files(staged, base):
         destination = (base / relative).resolve()
         if not destination.is_relative_to(base):
             raise ValueError("Путь назначения выходит за папку Капри")
+        if protected(destination.relative_to(base)):
+            raise ValueError("Путь назначения ведёт к личным файлам Капри")
         if not _same_file(source, destination):
             changes.append(relative)
     return changes

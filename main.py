@@ -90,7 +90,7 @@ DEFAULTS = {
     "use_google_stt": True,
     "voice": "ru-RU-SvetlanaNeural",
     "tts_engine": "edge",
-    "tts_timeout_seconds": 4,
+    "tts_timeout_seconds": 8,
     "voice_rate": "+10%",
     "voice_pitch": "+15Hz",
     "voice_shift": 0,

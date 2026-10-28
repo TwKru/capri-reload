@@ -1172,9 +1172,11 @@ class Actions:
         """Только перечисленные действия. Названия и поисковый текст не разбираются как цепочки команд."""
         if decision.action == "chat":
             return None
-        if original and decision.action in ("mute", "unmute") and decision.target:
-            if not self._audio_target_mentioned(decision.target, original):
+        if original and decision.action in ("mute", "unmute"):
+            target = decision.target or self._volume_request(norm(original))[0]
+            if target and not self._audio_target_mentioned(target, original):
                 return Reply("Уточни, в какой программе изменить звук.")
+            return self.volume(("выключи звук " if decision.action == "mute" else "включи звук ") + target, None)
         if original and decision.action == "gamma":
             match = re.search(r"\bгамм[ау](?:\s+(?:монитора|экрана))?\s+(?:(?:на|до)\s+)?(.+)$", norm(original))
             try:
@@ -1209,6 +1211,8 @@ class Actions:
         if decision.action == "gamma":
             return self.gamma_value(command, re.fullmatch(GAMMA_VALUE_RE, command))
         if decision.action == "open":
+            if original and not self._audio_target_mentioned(decision.target, original):
+                return Reply("Назови программу или сайт, который нужно открыть.")
             return self.open(command, re.fullmatch(r"открой (?P<t>.+)", command))
         if decision.action == "search":
             return self.search(command, re.fullmatch(r"найди (?P<q>.+)", command))
@@ -1274,6 +1278,10 @@ class Actions:
     def web(self, url):
         """Открыть адрес: в браузере из команды («… в хроме»), из настройки "browser" или в браузере
         по умолчанию Windows."""
+        parts = urllib.parse.urlsplit(url)
+        if (parts.scheme.lower() not in ("http", "https") or not parts.hostname or
+                parts.username or parts.password or any(ord(c) < 32 for c in url)):
+            raise ValueError("Разрешены только обычные адреса сайтов http/https")
         exe = find_browser(self.browser_once) or find_browser(self.cfg.get("browser"))
         if exe:
             subprocess.Popen([exe, url])
@@ -2435,4 +2443,5 @@ class Actions:
         try:
             os.startfile(target)
         except OSError:
-            subprocess.Popen(target, shell=True, creationflags=NO_WINDOW)
+            # Windows разбирает командную строку напрямую; &, |, > и $() не исполняются оболочкой.
+            subprocess.Popen(target, shell=False, creationflags=NO_WINDOW)

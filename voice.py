@@ -1,6 +1,7 @@
 """Распознавание речи (Vosk офлайн + Google для точности) и синтез голоса."""
 import asyncio
 import ctypes
+import hashlib
 import json
 import logging
 import math
@@ -286,6 +287,10 @@ def _mci(cmd):
     return err, buf.value
 
 
+class VoicePlaybackError(RuntimeError):
+    pass
+
+
 def play_mp3(path, stop_event, volume=100):
     """Играет mp3/wav, пока не закончится или не взведён stop_event. True — если прервали.
     volume 0..100 — громкость Капри (не трогает общую громкость Windows)."""
@@ -294,19 +299,22 @@ def play_mp3(path, stop_event, volume=100):
     # mp3 (чистый голос, если обработка не удалась) — через mpegvideo, он умеет менять громкость.
     wav = path.lower().endswith(".wav")
     if _mci(f'open "{path}" type {"waveaudio" if wav else "mpegvideo"} alias capri_tts')[0] != 0:
-        raise RuntimeError("MCI не открыл файл")
+        raise VoicePlaybackError("MCI не открыл файл")
     if not wav:
         _mci(f"setaudio capri_tts volume to {int(max(0, min(100, volume)) * 10)}")
-    _mci("play capri_tts")
     interrupted = False
     try:
+        if _mci("play capri_tts")[0]:
+            raise VoicePlaybackError("MCI не начал воспроизведение")
         while True:
             if stop_event.wait(0.05):
                 interrupted = True
                 _mci("stop capri_tts")
                 break
             err, mode = _mci("status capri_tts mode")
-            if err or mode != "playing":
+            if err:
+                raise VoicePlaybackError("MCI потерял устройство воспроизведения")
+            if mode != "playing":
                 break
     finally:
         _mci("close capri_tts")
@@ -332,7 +340,7 @@ def decode(path, sr=FX_SR):
     import subprocess
     import numpy as np
     raw = subprocess.run([_ffmpeg(), "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(sr), "-"],
-                         capture_output=True, check=True, creationflags=0x08000000).stdout
+                         capture_output=True, check=True, timeout=30, creationflags=0x08000000).stdout
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768
 
 
@@ -432,8 +440,15 @@ def pitch_shift(x, semitones):
 
 SILERO_PATH = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "Capri", "tts", "v4_ru.pt")
 SILERO_URL = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
+SILERO_SHA256 = "896ab96347d5bd781ab97959d4fd6885620e5aab52405d3445626eb7c1414b00"
 _silero = None
 _silero_lock = threading.Lock()
+
+
+def verify_silero(path):
+    with open(path, "rb") as file:
+        if hashlib.file_digest(file, "sha256").hexdigest() != SILERO_SHA256:
+            raise ValueError("Контрольная сумма Silero не совпала; загрузка исполняемой модели запрещена")
 
 
 def silero_model():
@@ -444,7 +459,12 @@ def silero_model():
             import torch
             if not os.path.exists(SILERO_PATH):
                 os.makedirs(os.path.dirname(SILERO_PATH), exist_ok=True)
-                torch.hub.download_url_to_file(SILERO_URL, SILERO_PATH)
+                with tempfile.TemporaryDirectory(dir=os.path.dirname(SILERO_PATH)) as folder:
+                    staging = os.path.join(folder, "model.pt")
+                    torch.hub.download_url_to_file(SILERO_URL, staging, hash_prefix=SILERO_SHA256)
+                    verify_silero(staging)
+                    os.replace(staging, SILERO_PATH)
+            verify_silero(SILERO_PATH)  # PackageImporter исполняет код из модели: проверяем и старый кэш
             torch.set_num_threads(4)
             model = torch.package.PackageImporter(SILERO_PATH).load_pickle("tts_models", "model")
             model.to(torch.device("cpu"))
@@ -498,9 +518,11 @@ class Speaker:
         self.stop_event = threading.Event()
         self.volume = int(cfg.get("voice_volume", 100))  # громкость Капри 0..100, общая громкость Windows не меняется
         self.edge_error = None  # почему не сработал голос Microsoft в последний раз (None — сработал)
-        self.tts_timeout = max(1.0, float(cfg.get("tts_timeout_seconds", 4)))
+        self.tts_timeout = max(1.0, float(cfg.get("tts_timeout_seconds", 8)))
         self._edge_retry_at = 0.0
         self._edge_failures = 0
+        self._recovery_lock = threading.Lock()
+        self._last_render_ok = 0.0
         if self.engine == "silero":  # прогреваем модель заранее, чтобы первая фраза не тормозила
             threading.Thread(target=self._warmup, daemon=True).start()
 
@@ -521,7 +543,8 @@ class Speaker:
         if not text:
             return False
         cached = os.path.isfile(self._cache_path(text))
-        if cached or time.monotonic() >= self._edge_retry_at:
+        started = time.monotonic()
+        if cached or time.monotonic() >= self._edge_retry_at or self.engine == "silero":
             try:
                 interrupted = self._edge(text)
                 if not cached:
@@ -529,8 +552,22 @@ class Speaker:
                     self._edge_failures = 0
                     self._edge_retry_at = 0.0
                 return interrupted
+            except VoicePlaybackError:
+                log.exception("Ошибка воспроизведения, пробую голос Windows")
+                if cached:
+                    try:
+                        os.remove(self._cache_path(text))
+                    except OSError:
+                        pass
             except Exception as e:
-                self._edge_failed(e)
+                self._edge_failed(e, started)
+        elif self._edge_retry_at - time.monotonic() <= 5 and self._recovery_lock.acquire(blocking=False):
+            def recover():
+                try:
+                    self.prepare("Связь восстановлена.", force=True)
+                finally:
+                    self._recovery_lock.release()
+            threading.Thread(target=recover, daemon=True).start()
         if self.stop_event.is_set():
             return True
         try:
@@ -539,32 +576,39 @@ class Speaker:
             log.exception("SAPI тоже не сработал")
             return False
 
-    def _edge_failed(self, error):
+    def _edge_failed(self, error, started=None):
+        if started is not None and self._last_render_ok > started:
+            return  # поздняя ошибка предзагрузки не отменяет более свежий успешный синтез
         self.edge_error = str(error) or type(error).__name__
         self._edge_failures = min(4, self._edge_failures + 1)
-        delay = min(300, 60 * 2 ** (self._edge_failures - 1))
+        delay = min(60, 15 * 2 ** (self._edge_failures - 1))
         self._edge_retry_at = time.monotonic() + delay
         log.info("Синтез голоса недоступен (%s), голос Windows; следующая попытка через %s с",
                  self.edge_error, delay)
 
-    def prepare(self, text):
+    def prepare(self, text, force=False):
         """Подготовить короткую следующую фразу в фоне, не включая звук."""
         text = clean_for_speech(text)
         if not text or len(text) > CACHE_MAX_TEXT:
             return False
-        if os.path.isfile(self._cache_path(text)):
+        if not force and os.path.isfile(self._cache_path(text)):
             return True
-        if time.monotonic() < self._edge_retry_at:
+        if not force and time.monotonic() < self._edge_retry_at:
             return False
+        started = time.monotonic()
         try:
             with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
-                self.cached_render(text, os.path.join(folder, "voice.wav"))
+                if force:
+                    self.render(text, os.path.join(folder, "voice.wav"))
+                else:
+                    self.cached_render(text, os.path.join(folder, "voice.wav"))
+            self._last_render_ok = time.monotonic()
             self.edge_error = None
             self._edge_failures = 0
             self._edge_retry_at = 0.0
             return os.path.isfile(self._cache_path(text))
         except Exception as error:
-            self._edge_failed(error)
+            self._edge_failed(error, started)
             return False
 
     def render_silero(self, text, dst):
@@ -606,9 +650,20 @@ class Speaker:
         parts = [f"{base}_{i}.mp3" for i in range(len(sentences))]
 
         async def go():  # фразы синтезируются параллельно — задержка как у одной
-            await asyncio.wait_for(asyncio.gather(
-                *(edge_tts.Communicate(s, self.voice, rate=r, pitch=self.pitch).save(f)
-                  for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout)
+            limit = asyncio.Semaphore(3)
+            async def synthesize(sentence, rate, path):
+                async with limit:
+                    for attempt in range(2):
+                        try:
+                            await edge_tts.Communicate(sentence, self.voice, rate=rate, pitch=self.pitch).save(path)
+                            return
+                        except Exception as error:
+                            if attempt or type(error).__name__ not in {
+                                    "NoAudioReceived", "ClientConnectionError", "ServerDisconnectedError", "ClientConnectorError"}:
+                                raise
+                            await asyncio.sleep(0.15)
+            await asyncio.wait_for(asyncio.gather(*(synthesize(s, r, f)
+                for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout)
         asyncio.run(go())
         try:
             import numpy as np
@@ -646,6 +701,7 @@ class Speaker:
             os.utime(path)  # свежие держим, старые потом удаляем
             return path
         out = self.render(text, dst)
+        self._last_render_ok = time.monotonic()
         if out.endswith(".wav") and len(text) <= CACHE_MAX_TEXT:  # длинные ответы нейросети не повторяются
             try:
                 os.makedirs(TTS_CACHE, exist_ok=True)
@@ -693,7 +749,7 @@ class Speaker:
                 sp.Voice = voices.Item(i)
                 break
         sp.Volume = max(0, min(100, self.volume))
-        sp.Speak(text, 1)  # SVSFlagsAsync
+        sp.Speak(text, 1 | 16)  # SVSFlagsAsync | SVSFIsNotXML: ответ ИИ всегда обычный текст
         while not sp.WaitUntilDone(50):
             if self.stop_event.is_set():
                 sp.Speak("", 2)  # SVSFPurgeBeforeSpeak — обрывает текущую речь
