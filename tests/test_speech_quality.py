@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import local_ai
 import persona
+import voice
 from personality import Personality
 
 
@@ -93,6 +94,32 @@ class CasualStyleTests(unittest.TestCase):
         self.assertIn("Блядь", second)
         self.assertFalse(person.strongly_hurt)
         self.assertIn("без оскорблений", person.context())
+
+
+class UncensoredVoiceTests(unittest.TestCase):
+    def test_profanity_uses_local_render_without_network(self):
+        speaker = voice.Speaker({})
+        for text in ("Готово. Заебись.", "Ебучий браузер опять завис.", "Охуенно.", "Хуёвый день."):
+            with self.subTest(text=text), patch.object(speaker, "render_sapi", return_value="local.wav") as local, \
+                    patch("edge_tts.Communicate") as network:
+                self.assertEqual(speaker.render(text, "local.wav"), "local.wav")
+            local.assert_called_once_with(text, "local.wav")
+            network.assert_not_called()
+
+    def test_local_speech_works_during_outage_without_resetting_network_health(self):
+        speaker = voice.Speaker({})
+        speaker._edge_retry_at = float("inf")
+        speaker.edge_error = "network unavailable"
+        with patch("voice.os.path.isfile", return_value=False), patch.object(speaker, "_edge", return_value=False) as render:
+            speaker.say("Готово. Заебись.")
+        render.assert_called_once()
+        self.assertEqual(speaker.edge_error, "network unavailable")
+        self.assertEqual(speaker._edge_retry_at, float("inf"))
+
+    def test_plain_speech_keeps_its_normal_backend(self):
+        speaker = voice.Speaker({})
+        self.assertFalse(speaker._local_profanity("Открываю программу CS2."))
+        self.assertFalse(speaker._local_profanity("Подстрахуй меня."))
 
 
 if __name__ == "__main__":
