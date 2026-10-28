@@ -4,10 +4,11 @@ import math
 import os
 import random
 import time
+from collections import OrderedDict
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal, QPoint
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QRegion, QPainter, QPainterPath, QPen,
-                           QPolygonF, QGuiApplication)
+from PySide6.QtGui import (QColor, QFont, QImage, QImageReader, QRegion, QPainter, QPainterPath, QPen,
+                           QPolygonF, QGuiApplication, QStaticText, QTextOption, QTransform)
 from PySide6.QtWidgets import QWidget
 
 PINK = QColor(255, 34, 96)
@@ -382,6 +383,37 @@ class LightningOverlay(QWidget):
         p.end()
 
 
+class AnimationFrames:
+    """PNG декодируются по требованию; в памяти остаётся не более восьми кадров на анимацию."""
+    CACHE_SIZE = 8
+
+    def __init__(self, files):
+        self.files = tuple(files)
+        self.cache = OrderedDict()
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, index):
+        if not -len(self.files) <= index < len(self.files):
+            raise IndexError(index)
+        index %= len(self.files)
+        if index in self.cache:
+            self.cache.move_to_end(index)
+            return self.cache[index]
+        src = hidpi(QImage(self.files[index]))
+        img = canvas(W, FIG_H)
+        p = QPainter(img)
+        sw, sh = src.deviceIndependentSize().width(), src.deviceIndependentSize().height()
+        y = FIG_H - sh if sh >= FIG_H * 0.9 else (FIG_H - sh) // 2
+        p.drawImage(QPointF((W - sw) // 2, y), src)
+        p.end()
+        self.cache[index] = img
+        while len(self.cache) > self.CACHE_SIZE:
+            self.cache.popitem(last=False)
+        return img
+
+
 def load_anims(anim_dir):
     """assets/anim/<имя>/*.png → {имя: [кадры размером W×FIG_H]}. Кадры делает tools/convert_anim.py."""
     anims = {}
@@ -390,20 +422,8 @@ def load_anims(anim_dir):
     for name in sorted(os.listdir(anim_dir)):
         folder = os.path.join(anim_dir, name)
         files = sorted(f for f in os.listdir(folder) if f.lower().endswith(".png")) if os.path.isdir(folder) else []
-        frames = []
-        for f in files:
-            src = QImage(os.path.join(folder, f))
-            if src.isNull():
-                continue
-            src = hidpi(src)
-            img = canvas(W, FIG_H)
-            p = QPainter(img)
-            sw, sh = src.deviceIndependentSize().width(), src.deviceIndependentSize().height()
-            # персонажа ставим на «пол», остальное (глаз) — по центру
-            y = FIG_H - sh if sh >= FIG_H * 0.9 else (FIG_H - sh) // 2
-            p.drawImage(QPointF((W - sw) // 2, y), src)
-            p.end()
-            frames.append(img)
+        frames = AnimationFrames([os.path.join(folder, f) for f in files
+                                  if QImageReader(os.path.join(folder, f)).canRead()])
         if frames:
             anims[name] = frames
     return anims
@@ -471,12 +491,22 @@ class Avatar(QWidget):
         self.anim_loop = False
 
         self.frame = canvas(W, H)
+        self._scanlines = canvas(W, FIG_H)
+        scan = QPainter(self._scanlines)
+        scan.setRenderHint(AA)
+        scan.setPen(QPen(QColor(0, 0, 0, 80), 1))
+        for y in range(0, FIG_H, 3):
+            scan.drawLine(0, y, W, y)
+        scan.end()
         self.state = "hidden"       # hidden / appearing / visible / vanishing
         self.mode = "idle"           # idle / listening / thinking / speaking
         self.mode_until = 0.0
         self.hide_at = 0.0
         self.hide_after = 12.0
         self.subtitle = ""
+        self._subtitle_key = None
+        self._subtitle_static = None
+        self._tint_cache = OrderedDict()
         self.k = 0                   # кадров в текущей фазе
         self.t = 0
         self.burst = 0
@@ -828,8 +858,8 @@ class Avatar(QWidget):
         split = int(2 + 12 * glitch) if glitch > 0.1 else (1 if self.mode == "speaking" else 0)
         if split:
             p.setOpacity(0.55)
-            p.drawImage(ox - split, oy, tinted(fig, QColor(255, 0, 60)))
-            p.drawImage(ox + split, oy + (1 if glitch > .5 else 0), tinted(fig, CYAN))
+            p.drawImage(ox - split, oy, self._tinted(fig, QColor(255, 0, 60)))
+            p.drawImage(ox + split, oy + (1 if glitch > .5 else 0), self._tinted(fig, CYAN))
             p.setOpacity(1.0)
 
         if glitch > 0.15:
@@ -844,7 +874,7 @@ class Avatar(QWidget):
 
         if flash:
             p.setOpacity(random.uniform(.5, .95))
-            p.drawImage(ox, oy, tinted(fig, WHITE if random.random() < .5 else PINK))
+            p.drawImage(ox, oy, self._tinted(fig, WHITE if random.random() < .5 else PINK))
             p.setOpacity(1.0)
         p.restore()
 
@@ -857,9 +887,7 @@ class Avatar(QWidget):
 
         # строки развёртки — вырезаем прозрачные полосы
         p.setCompositionMode(CM.CompositionMode_DestinationOut)
-        p.setPen(QPen(QColor(0, 0, 0, 80), 1))
-        for y in range(0, FIG_H, 3):
-            p.drawLine(0, y, W, y)
+        p.drawImage(0, 0, self._scanlines)
         roll = (self.t * 5) % FIG_H
         p.setPen(QPen(QColor(0, 0, 0, 120), 6))
         p.drawLine(0, roll, W, roll)
@@ -868,6 +896,17 @@ class Avatar(QWidget):
         p.resetTransform()
         self._hud(p, glitch)
         p.end()
+
+    def _tinted(self, image, color):
+        if self.eye_pos is not None:
+            return tinted(image, color)
+        key = image.cacheKey(), color.rgba()
+        if key not in self._tint_cache:
+            self._tint_cache[key] = tinted(image, color)
+            if len(self._tint_cache) > 12:
+                self._tint_cache.popitem(last=False)
+        self._tint_cache.move_to_end(key)
+        return self._tint_cache[key]
 
     def _crt_line(self, p, width, height):
         x = (W - width) / 2
@@ -898,33 +937,46 @@ class Avatar(QWidget):
             h = 2 + random.random() * 14 * level
             p.fillRect(QRectF(W - 120 + i * 9, top + 22 - h, 6, h), PINK if i % 3 else CYAN)
 
-        text = self.subtitle
-        if glitch > 0.2 and text:
-            chars = list(text)
-            for _ in range(int(len(chars) * glitch * .15) + 1):
-                i = random.randrange(len(chars))
-                chars[i] = random.choice("▓░#@%&/\\")
-            text = "".join(chars)
         rect = QRectF(16, top + 30, W - 32, bottom - top - 34)
-        flags = int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignTop)
-        # длинный текст: уменьшаем шрифт, пока влезает; если не влез и при 7pt — обрезаем с «…»
+        font, text = self._prepare_subtitle(rect)
+        p.setFont(font)
+        p.setPen(QColor(0, 240, 255, 170))
+        p.drawStaticText(rect.topLeft() + QPointF(1.5, 1), text)
+        p.setPen(QColor(255, 200, 220))
+        p.drawStaticText(rect.topLeft(), text)
+
+    def _prepare_subtitle(self, rect):
+        key = self.subtitle, rect.width(), rect.height(), DPR
+        if key == self._subtitle_key:
+            return self._subtitle_static
+        # Текст ИИ может быть длинным: полный ответ остаётся в subtitle, ограничен только видимый фрагмент.
+        full = self.subtitle[:4096]
+        def layout(value, font):
+            text = QStaticText(value)
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setTextWidth(rect.width())
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            text.setTextOption(option)
+            text.prepare(QTransform(), font)
+            return text
         for size in (10, 9, 8, 7):
             font = QFont("Consolas", size)
-            fits = QFontMetrics(font).boundingRect(rect.toRect(), flags, text).height() <= rect.height()
-            if fits:
+            text = layout(full, font)
+            if text.size().height() <= rect.height():
                 break
-        p.setFont(font)
-        if not fits:
-            fm = QFontMetrics(font)
-            words = text.split()
-            while len(words) > 1 and fm.boundingRect(rect.toRect(), flags,
-                                                     " ".join(words) + "…").height() > rect.height():
-                words.pop()
-            text = " ".join(words) + "…"
-        p.setPen(QColor(0, 240, 255, 170))
-        p.drawText(rect.translated(1.5, 1), flags, text)
-        p.setPen(QColor(255, 200, 220))
-        p.drawText(rect, flags, text)
+        if text.size().height() > rect.height() or len(self.subtitle) > len(full):
+            lo, hi = 0, len(full)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if layout(full[:mid].rstrip() + "…", font).size().height() <= rect.height():
+                    lo = mid
+                else:
+                    hi = mid - 1
+            text = layout(full[:lo].rstrip() + "…", font)
+        self._subtitle_key = key
+        self._subtitle_static = font, text
+        return self._subtitle_static
 
     def paintEvent(self, _):
         p = QPainter(self)

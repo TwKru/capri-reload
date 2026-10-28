@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass
+from functools import lru_cache
 
 import psutil
 
@@ -339,6 +340,7 @@ class AppIndex:
         log.info("Найдено приложений: %d", len(items))
 
     @staticmethod
+    @lru_cache(maxsize=2048)
     def _sound(s):
         s = re.sub(r"\s", "", translit(s.lower()))
         for a, b in (("ph", "f"), ("ck", "k"), ("c", "k"), ("q", "k"), ("w", "v"), ("x", "ks"), ("z", "s")):
@@ -346,6 +348,7 @@ class AppIndex:
         return s
 
     @staticmethod
+    @lru_cache(maxsize=2048)
     def _skeleton(s):
         """Согласные без гласных: «cloud», «claude», «клод» → «kld». Ловит созвучные названия."""
         return re.sub(r"[aeiouy]", "", AppIndex._sound(s))

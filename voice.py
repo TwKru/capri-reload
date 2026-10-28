@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import wave
+import weakref
 
 log = logging.getLogger("capri")
 RATE = 16000
@@ -497,9 +498,11 @@ CACHE_MAX_FILES = 600   # сколько готовых фраз хранить 
 
 def _trim_cache():
     try:
-        files = sorted((os.path.join(TTS_CACHE, f) for f in os.listdir(TTS_CACHE)), key=os.path.getmtime)
-        for f in files[:-CACHE_MAX_FILES]:
-            os.remove(f)
+        with os.scandir(TTS_CACHE) as entries:
+            files = sorted((entry.stat().st_mtime, entry.path) for entry in entries
+                           if entry.name.endswith(".wav") and entry.is_file(follow_symlinks=False))
+        for _, path in files[:-CACHE_MAX_FILES]:
+            os.remove(path)
     except OSError:
         pass
 
@@ -524,6 +527,8 @@ class Speaker:
         self._recovery_lock = threading.Lock()
         self._last_render_ok = 0.0
         self.background_paused = False
+        self._render_locks_guard = threading.Lock()
+        self._render_locks = weakref.WeakValueDictionary()
         if self.engine == "silero":  # прогреваем модель заранее, чтобы первая фраза не тормозила
             threading.Thread(target=self._warmup, daemon=True).start()
 
@@ -699,6 +704,21 @@ class Speaker:
 
     def cached_render(self, text, dst):
         """Путь к готовому звуку фразы: из кэша или свежий (и тогда кладём его в кэш)."""
+        if len(text) > CACHE_MAX_TEXT:
+            out = self.render(text, dst)
+            self._last_render_ok = time.monotonic()
+            return out
+        path = self._cache_path(text)
+        with self._render_locks_guard:
+            lock = self._render_locks.get(path)
+            if lock is None:
+                lock = threading.Lock()
+                self._render_locks[path] = lock
+        # Предзагрузка и произнесение одной фразы делят синтез, разные фразы не блокируют друг друга.
+        with lock:
+            return self._cached_render(text, dst)
+
+    def _cached_render(self, text, dst):
         path = self._cache_path(text)
         if os.path.isfile(path):
             os.utime(path)  # свежие держим, старые потом удаляем
