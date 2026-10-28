@@ -436,6 +436,8 @@ class Capri(QObject):
     # ----- перебивание -----
     def is_echo(self, text):
         """Микрофон слышит голос самой Капри: все слова фразы есть в том, что она говорит."""
+        if self.speaking and getattr(self.speaker, "playing", True) is False:
+            return False  # пока синтез только ждёт сеть, голос пользователя не может быть эхом
         words = text.lower().replace("ё", "е").split()
         return bool(words) and all(w in self.speech_words for w in words)
 
@@ -485,14 +487,16 @@ class Capri(QObject):
             if self.cfg.get("barge_in") and self.wants_interrupt(text):
                 self.interrupt()
             return
+        if self.has_wake(text) and (now > self.awake_until or now - self.last_partial_wake > 3):
+            self.last_partial_wake = now
+            self.awake_until = now + self.cfg["listen_window_seconds"]
+            log.info("Распознано обращение по имени, слушаю команду")
+            self.appear(self.cfg["listen_window_seconds"])
+            return
         if now <= self.awake_until:
             # Имя уже прозвучало: окно ограничивает ожидание начала команды, а не её длину.
             self.awake_until = now + self.cfg["listen_window_seconds"]
             return
-        if now - self.last_partial_wake > 3 and now > self.awake_until and self.has_wake(text):
-            self.last_partial_wake = now
-            self.awake_until = now + self.cfg["listen_window_seconds"]
-            self.appear(self.cfg["listen_window_seconds"])
 
     def on_final(self, text, audio):
         now = time.time()

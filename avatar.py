@@ -584,22 +584,21 @@ class Avatar(QWidget):
     def set_game_mode(self, active):
         self.game_mode = bool(active)
         if self.game_mode:
-            self.timer.stop()
             self.overlay.timer.stop()
             self.overlay.hide()
-            self.state = "hidden"
-            self.roaming = self.hopping = False
+            self.hopping = False
             self.tele_target = self.hop_home = None
-            self.anim = None
-            self.hide()
+            self.lag = self.burst = 0
+            if self.timer.isActive():
+                self.timer.setInterval(33)
 
     def start_roam(self):
         """Прогулка: Капри появляется у одного края экрана и идёт вдоль панели задач к другому."""
-        if self.game_mode or (self.roam_img is None and "walk" not in self.anims):
+        if self.roam_img is None and "walk" not in self.anims:
             return
         self.anim = None
         self.lag = self.burst = 0
-        self.timer.start(16)
+        self.timer.start(33 if self.game_mode else 16)
         geo = QGuiApplication.primaryScreen().availableGeometry()
         self.home_pos = self.pos() if self.user_moved else QPoint(geo.left() + 24, geo.bottom() - H)
         self.roam_dir = random.choice((-1, 1))
@@ -644,6 +643,9 @@ class Avatar(QWidget):
 
     # ---------- телепорт молнией ----------
     def teleport(self, target):
+        if self.game_mode:
+            self.move(target)
+            return
         if self.state == "visible" and self.tele_target is None and not self.roaming:
             self.tele_target, self.tele_k = target, 0
 
@@ -724,8 +726,6 @@ class Avatar(QWidget):
         self.next_pose = time.time() + random.uniform(12, 30)
 
     def summon(self):
-        if self.game_mode:
-            return
         self.timer.start(33)
         self.stop_roam()
         if self.state in ("visible", "appearing"):
@@ -746,7 +746,7 @@ class Avatar(QWidget):
             self.state, self.k = "vanishing", 0
 
     def play_anim(self, name, loop=False):
-        if name in self.anims and not self.game_mode:
+        if name in self.anims:
             self.anim, self.anim_start, self.anim_loop = name, time.time(), loop
             self.lag = self.burst = 0
 
@@ -774,7 +774,7 @@ class Avatar(QWidget):
 
     # ---------- анимация ----------
     def tick(self):
-        interval = 16 if self.roaming or self.anim in ("spin", "walk") else 33
+        interval = 16 if not self.game_mode and (self.roaming or self.anim in ("spin", "walk")) else 33
         self.timer.setInterval(interval)
         self.t += 1
         self.k += interval / 33
@@ -806,7 +806,7 @@ class Avatar(QWidget):
             self.update()
             return
         elif (self.state == "visible" and self.mode == "idle" and self.anim is None and
-              "spin" in self.anims and now >= self.next_spin):
+              not self.game_mode and "spin" in self.anims and now >= self.next_spin):
             self.play_anim("spin")
             self.next_spin = now + random.uniform(25, 60)
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
@@ -816,7 +816,7 @@ class Avatar(QWidget):
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        smooth = self.roaming or self.anim in ("spin", "walk")
+        smooth = self.game_mode or self.roaming or self.anim in ("spin", "walk")
         if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
@@ -891,7 +891,12 @@ class Avatar(QWidget):
         yscale = 1.0
         xscale = 1.0
 
-        if self.tele_target is not None:
+        if self.game_mode:
+            if self.state == "appearing":
+                p.setOpacity(min(1.0, self.k / APPEAR_FRAMES))
+            elif self.state == "vanishing":
+                p.setOpacity(max(0.0, 1 - self.k / VANISH_FRAMES))
+        elif self.tele_target is not None:
             # перед телепортом сжимается в узкую красную вспышку
             glitch, flash = 1.0, True
             xscale = max(0.04, 1 - self.tele_k / TELE_OUT_FRAMES)

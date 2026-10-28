@@ -1,4 +1,4 @@
-"""В игре нет прозрачных окон и фонового прогрева; команды и голос остаются доступны."""
+"""В игре аватар остаётся видимым, тяжёлые эффекты и фоновый прогрев отключены."""
 import copy
 import io
 import json
@@ -10,13 +10,16 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from avatar import Avatar  # noqa: E402
-from game_mode import covers_monitor  # noqa: E402
+from game_mode import covers_monitor, fullscreen_candidate  # noqa: E402
 from local_ai import LocalAI  # noqa: E402
 import main  # noqa: E402
 import voice  # noqa: E402
 
 
 class FullscreenTests(unittest.TestCase):
+    def test_maximized_browser_is_not_a_fullscreen_game(self):
+        self.assertFalse(fullscreen_candidate((-8, -8, 1928, 1088), (0, 0, 1920, 1080), 0x15C70000))
+        self.assertTrue(fullscreen_candidate((0, 0, 1920, 1080), (0, 0, 1920, 1080), 0x96000000))
     def test_other_monitor_and_borderless_frames(self):
         self.assertTrue(covers_monitor((1920, 0, 4480, 1440), (1920, 0, 4480, 1440)))
         self.assertTrue(covers_monitor((-8, -8, 1928, 1088), (0, 0, 1920, 1080)))
@@ -35,26 +38,27 @@ class AvatarGamingTests(unittest.TestCase):
         self.addCleanup(self.avatar.overlay.close)
         self.addCleanup(self.avatar.close)
 
-    def test_game_mode_blocks_summon_roam_and_lightning(self):
+    def test_game_mode_keeps_avatar_and_blocks_lightning(self):
         self.avatar.set_game_mode(True)
         with patch.object(self.avatar.overlay, "strike") as strike:
             self.avatar.summon()
             self.avatar.start_roam()
             self.avatar.start_hopping()
             self.avatar.set_mode("speaking")
-            self.assertFalse(self.avatar.isVisible())
-            self.assertFalse(self.avatar.timer.isActive())
+            self.assertTrue(self.avatar.isVisible())
+            self.assertTrue(self.avatar.timer.isActive())
+            self.assertEqual(self.avatar.timer.interval(), 33)
             self.assertFalse(self.avatar.overlay.timer.isActive())
             self.assertFalse(self.avatar.hopping)
         strike.assert_not_called()
 
-    def test_entering_game_hides_existing_windows_and_normal_mode_can_resume(self):
+    def test_entering_game_does_not_hide_existing_avatar(self):
         with patch.object(self.avatar, "raise_"):
             self.avatar.summon()
         self.assertTrue(self.avatar.timer.isActive())
         self.avatar.set_game_mode(True)
-        self.assertFalse(self.avatar.isVisible())
-        self.assertFalse(self.avatar.timer.isActive())
+        self.assertTrue(self.avatar.isVisible())
+        self.assertTrue(self.avatar.timer.isActive())
         self.avatar.set_game_mode(False)
         with patch.object(self.avatar, "raise_"):
             self.avatar.summon()

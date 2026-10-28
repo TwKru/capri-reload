@@ -33,6 +33,21 @@ class ListeningTests(unittest.TestCase):
         job = self.capri.jobs.get_nowait()
         self.assertEqual(job[1], "открой ютуб")
 
+    def test_name_during_synthesis_is_not_mistaken_for_echo(self):
+        self.capri.speaking = True
+        self.capri.speech_words = {"капри", "онлайн"}
+        self.capri.speaker.playing = False
+        self.capri.on_partial("капри")
+        self.capri.speaker.stop.assert_called_once()
+        self.assertGreater(self.capri.awake_until, time.time())
+
+    def test_repeated_name_refreshes_avatar_while_listening(self):
+        self.capri.awake_until = time.time() + 8
+        self.capri.last_partial_wake = time.time() - 4
+        with patch.object(self.capri, "appear") as appear:
+            self.capri.on_partial("капри")
+        appear.assert_called_once()
+
     def test_name_then_one_separate_phrase(self):
         self.capri.on_final("капри", b"name")
         self.assertGreater(self.capri.awake_until, time.time())

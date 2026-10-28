@@ -15,6 +15,11 @@ def covers_monitor(window, monitor, tolerance=2):
             right >= mr - tolerance and bottom >= mb - tolerance)
 
 
+def fullscreen_candidate(window, monitor, style):
+    # Развёрнутая обычная программа с заголовком — не эксклюзивный/безрамочный полноэкранный режим.
+    return not (style & 0x00C00000 == 0x00C00000) and covers_monitor(window, monitor)
+
+
 def fullscreen_app_active():
     try:
         user32 = ctypes.windll.user32
@@ -24,6 +29,8 @@ def fullscreen_app_active():
         user32.MonitorFromWindow.restype = wintypes.HANDLE
         user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
         user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+        user32.GetWindowLongW.restype = wintypes.LONG
         window = user32.GetForegroundWindow()
         if not window or user32.IsIconic(window):
             return False
@@ -40,6 +47,6 @@ def fullscreen_app_active():
             return False
         def bounds(r):
             return r.left, r.top, r.right, r.bottom
-        return covers_monitor(bounds(rect), bounds(info.rcMonitor))
+        return fullscreen_candidate(bounds(rect), bounds(info.rcMonitor), user32.GetWindowLongW(window, -16))
     except (OSError, AttributeError):
         return False

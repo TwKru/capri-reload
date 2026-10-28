@@ -75,13 +75,13 @@ class MotionTests(unittest.TestCase):
         render.assert_called_once()
         self.assertEqual(self.view.timer.interval(), 16)
 
-    def test_game_mode_blocks_new_motion(self):
+    def test_game_mode_allows_requested_motion_at_lower_frame_rate(self):
         self.view.set_game_mode(True)
         self.view.play_anim("spin")
         self.view.start_roam()
-        self.assertFalse(self.view.roaming)
-        self.assertIsNone(self.view.anim)
-        self.assertFalse(self.view.isVisible())
+        self.assertTrue(self.view.roaming)
+        self.assertEqual(self.view.timer.interval(), 33)
+        self.assertTrue(self.view.isVisible())
 
     def test_direct_motion_commands_do_not_need_ai(self):
         with patch("actions.AppIndex.build"):

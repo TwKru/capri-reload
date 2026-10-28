@@ -519,6 +519,7 @@ class Speaker:
         self.silero_voice = cfg.get("silero_voice", "xenia")
         self.silero_pitch = cfg.get("silero_pitch", "high")
         self.stop_event = threading.Event()
+        self.playing = False  # синтез/ожидание сети ещё не является слышимой речью
         self.volume = int(cfg.get("voice_volume", 100))  # громкость Капри 0..100, общая громкость Windows не меняется
         self.edge_error = None  # почему не сработал голос Microsoft в последний раз (None — сработал)
         self.tts_timeout = max(1.0, float(cfg.get("tts_timeout_seconds", 8)))
@@ -762,7 +763,11 @@ class Speaker:
             path = self.cached_render(text, os.path.join(folder, "voice.wav"))
             if self.stop_event.is_set():
                 return True
-            return play_mp3(path, self.stop_event, self.volume)
+            self.playing = True
+            try:
+                return play_mp3(path, self.stop_event, self.volume)
+            finally:
+                self.playing = False
 
     def _sapi(self, text):
         import comtypes.client
@@ -774,12 +779,16 @@ class Speaker:
                 sp.Voice = voices.Item(i)
                 break
         sp.Volume = max(0, min(100, self.volume))
-        sp.Speak(text, 1 | 16)  # SVSFlagsAsync | SVSFIsNotXML: ответ ИИ всегда обычный текст
-        while not sp.WaitUntilDone(50):
-            if self.stop_event.is_set():
-                sp.Speak("", 2)  # SVSFPurgeBeforeSpeak — обрывает текущую речь
-                return True
-        return False
+        self.playing = True
+        try:
+            sp.Speak(text, 1 | 16)  # SVSFlagsAsync | SVSFIsNotXML
+            while not sp.WaitUntilDone(50):
+                if self.stop_event.is_set():
+                    sp.Speak("", 2)
+                    return True
+            return False
+        finally:
+            self.playing = False
 
 
 def make_glitch_sound(path, volume=100):
