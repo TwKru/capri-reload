@@ -24,13 +24,36 @@ PATTERNS = tuple((event, re.compile(pattern)) for event, pattern in (
     ("thanks", r"(?:большое |огромное )?(?:спасибо|спс|пасиб|благодарю)(?: тебе| тебя| большое| капри)?"),
     ("hurt", r"(?:(?:ты|капри) (?:вообще |совсем |такая |просто |очень )?)?(?:тупая|глупая|дура|"
              r"дурочка|идиотка|бестолковая|бесполезная|тупица|сука)|ты (?:ничего не умеешь|меня бесишь)|"
-             r"(?:пошла|иди) (?:нафиг|нахуй)|обидься"),
+             r"(?:да )?(?:пошла|иди)(?: ты)? (?:нафиг|нахуй|на хуй|в пизду)|обидься"),
     ("tease", r"(?:(?:ты|капри) (?:такая |просто )?)?(?:вредина|засранка|заноза|хитрюга)|не вредничай"),
     ("mood", r"(?:ну )?(?:как (?:у тебя )?настроение|какое у тебя настроение|как ты себя чувствуешь|как дела|как твои дела|"
              r"ты обиделась|ты на меня обиделась|ты злишься|ты на меня злишься|что с тобой|почему ты обиделась|на что ты обиделась)"),
     ("bored", r"(?:ты )?скучаешь|тебе скучно"),
     ("entertain", r"мне скучно|развесели меня|расскажи шутку|пошути"),
 ))
+
+SEVERE_INSULT = re.compile(r"(?:да )?(?:пошла|иди)(?: ты)? (?:нахуй|на хуй|в пизду)")
+ANGRY_REPLIES = (
+    "Ебать, у тебя манеры. Нести хуйню — не баг-репорт. Объясняй, что исправить.",
+    "Нихуя себе общение. Посылать меня нахуй проще, чем нормально сформулировать задачу, да?",
+    "Да поняла я, блядь. Теперь давай по делу, а не по этому пиздецу.",
+)
+ANGRY_MOOD_REPLIES = (
+    "Обижена пиздец. После таких посылов я имею право побурчать. Но команды работают.",
+    "Да, я злюсь, блядь. Не на задачу, а на то, как ты со мной разговариваешь.",
+)
+ANGRY_COMMAND_LINES = {
+    "roam": "Ладно, блядь, пройдусь. Заодно остыну.",
+    "wave": "Машу. Настроение пиздец, но жест работает.",
+    "hide": "Уйду в тень. Если нужна помощь — объясни нормально, без этой хуйни.",
+    "spin": "Ладно, блядь, один оборот. Злость мне крутиться не мешает.",
+}
+ANGRY_CONTEXT = (
+    "Сильная обида после прямого посыла или повторных оскорблений пользователя. Только сейчас разрешён "
+    "крепкий русский мат без звёздочек: блядь, нахуй, пиздец, охуел. Можно резко и саркастично ответить "
+    "на грубость. Не угрожай, не затрагивай группы людей и не отказывай в помощи. Сначала отвечай по делу; "
+    "короткий матерный подкол допустим. Это состояние закончится автоматически или после примирения."
+)
 
 REPLIES = {
     "hurt": ("Эй, это было обидно. Немного побурчу, но с делами помогу.",
@@ -146,9 +169,19 @@ class Personality:
         return self._mood
 
     def context(self):
-        return MOOD_CONTEXT[self.mood] if self.enabled else ""
+        if not self.enabled:
+            return ""
+        if self.strongly_hurt:
+            return MOOD_CONTEXT["hurt"] + "\n" + ANGRY_CONTEXT
+        return MOOD_CONTEXT[self.mood] + "\nКрепкий мат сейчас запрещён: сильной обиды нет. Отвечай без мата."
+
+    @property
+    def strongly_hurt(self):
+        return self.mood == "hurt" and self._strikes >= 3
 
     def command_line(self, key, default):
+        if self.strongly_hurt:
+            return ANGRY_COMMAND_LINES.get(key, default)
         return COMMAND_LINES.get(self.mood, {}).get(key, default) if self.enabled else default
 
     def prewarm_phrases(self):
@@ -156,6 +189,7 @@ class Personality:
             return []
         phrases = [phrase for bank in (*REPLIES.values(), *MOOD_REPLIES.values()) for phrase in bank]
         phrases.extend(phrase for bank in COMMAND_LINES.values() for phrase in bank.values())
+        phrases.extend((*ANGRY_REPLIES, *ANGRY_MOOD_REPLIES, *ANGRY_COMMAND_LINES.values()))
         return list(dict.fromkeys(phrases))
 
     @staticmethod
@@ -186,18 +220,25 @@ class Personality:
         previous = self.mood
         self.last_interaction = self.clock()
         event = self._event(text)
+        event_text = text
         remainder = None
         if event is None:
             # Только отдельная социальная реплика в начале. Названия песен/поисковые запросы не трогаем.
             parts = re.split(r"[,;.!?]\s*", text, maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
                 event = self._event(parts[0])
+                event_text = parts[0]
                 remainder = parts[1].strip() if event else None
         if event is None:
             return Reaction(text)
         key = event
         if event == "hurt":
-            self._strikes = min(3, self._strikes + 1) if previous == "hurt" else 1
+            if SEVERE_INSULT.fullmatch(clean(event_text)):
+                self._strikes = 3
+            elif clean(event_text) == "обидься":
+                self._strikes = self._strikes if previous == "hurt" else 1
+            else:
+                self._strikes = min(3, self._strikes + 1) if previous == "hurt" else 1
             self._set("hurt", 90 * self._strikes)
             key = "hurt_again" if self._strikes > 1 else "hurt"
         elif event in ("sorry", "joke"):
@@ -225,12 +266,18 @@ class Personality:
         if remainder:
             return Reaction(remainder, event=event)
         if event == "mood":
+            if self.strongly_hurt:
+                return Reaction(text, self._pick("angry_mood", ANGRY_MOOD_REPLIES), event)
             return Reaction(text, self._pick(self.mood, MOOD_REPLIES[self.mood]), event)
+        if event == "hurt" and self.strongly_hurt:
+            return Reaction(text, self._pick("angry", ANGRY_REPLIES), event)
         return Reaction(text, self._pick(key, REPLIES[key]), event)
 
     def chatter_line(self):
         if not self.enabled:
             return None
+        if self.strongly_hurt:
+            return self._pick("angry_chatter", ("Пойду прогуляюсь. Остыну от этого пиздеца.", "Ладно, блядь. Уже остываю, если нужна помощь — зови."))
         if self.mood == "neutral" and self.clock() - self.last_interaction > 900:
             self._set("bored", 120)
         choices = {

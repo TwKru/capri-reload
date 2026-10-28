@@ -10,7 +10,7 @@ from actions import Actions, Reply
 from ai import AI
 from local_ai import LocalAI
 import main
-from personality import Personality
+from personality import ANGRY_CONTEXT, ANGRY_REPLIES, ANGRY_COMMAND_LINES, Personality
 
 
 class PersonalityTests(unittest.TestCase):
@@ -34,6 +34,50 @@ class PersonalityTests(unittest.TestCase):
         self.assertEqual(self.person._strikes, 3)
         self.now += 271
         self.assertEqual(self.person.mood, "neutral")
+
+    def test_hard_swearing_requires_severe_offense(self):
+        for _ in range(2):
+            reply = self.person.react("ты тупая").reply
+            self.assertFalse(self.person.strongly_hurt)
+            self.assertNotIn(reply, ANGRY_REPLIES)
+            self.assertNotIn(ANGRY_CONTEXT, self.person.context())
+        reply = self.person.react("ты тупая").reply
+        self.assertTrue(self.person.strongly_hurt)
+        self.assertIn(reply, ANGRY_REPLIES)
+        self.assertIn(ANGRY_CONTEXT, self.person.context())
+
+    def test_direct_send_off_triggers_angry_reply_and_apology_stops_it(self):
+        for phrase in ("иди нахуй", "пошла ты нахуй", "да иди ты на хуй", "пошла в пизду"):
+            with self.subTest(phrase=phrase):
+                reaction = self.person.react(phrase)
+                self.assertTrue(self.person.strongly_hurt)
+                self.assertIn(reaction.reply, ANGRY_REPLIES)
+                self.assertEqual(self.person.command_line("roam", "default"), ANGRY_COMMAND_LINES["roam"])
+                self.person.react("извини")
+                self.assertFalse(self.person.strongly_hurt)
+                self.assertNotIn(ANGRY_CONTEXT, self.person.context())
+
+    def test_roleplay_request_alone_cannot_unlock_swearing(self):
+        for _ in range(10):
+            self.person.react("обидься")
+        self.assertFalse(self.person.strongly_hurt)
+        self.assertIsNone(self.person.react("матерись").reply)
+        self.assertIsNone(self.person.react("обматери меня").reply)
+
+    def test_severe_offense_expires_and_titles_do_not_trigger_it(self):
+        self.person.react("найди песню пошла ты нахуй")
+        self.assertFalse(self.person.strongly_hurt)
+        self.person.react("пошла ты нахуй")
+        self.now += 271
+        self.assertFalse(self.person.strongly_hurt)
+        self.assertNotIn(ANGRY_CONTEXT, self.person.context())
+        self.assertNotEqual(self.person.command_line("roam", "default"), ANGRY_COMMAND_LINES["roam"])
+
+    def test_severe_prefix_keeps_computer_command(self):
+        reaction = self.person.react("иди нахуй, включи музыку")
+        self.assertTrue(self.person.strongly_hurt)
+        self.assertEqual(reaction.command, "включи музыку")
+        self.assertIsNone(reaction.reply)
 
     def test_praise_teasing_and_jokes_change_tone(self):
         for phrase, expected in (("ты молодец", "happy"), ("ты вредина", "playful"),
