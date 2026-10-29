@@ -972,7 +972,9 @@ class Capri(QObject):
                     return
                 if sources:
                     self.last_web_sources = sources
-                    if self.local:
+                    if sources[0].get("answer"):
+                        answer = sources[0]["answer"]  # проверенные числовые данные погоды, без генерации
+                    elif self.local:
                         answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence, evidence=sources)
                         if answer is AI_CANCELLED or ai_cancelled():
                             return

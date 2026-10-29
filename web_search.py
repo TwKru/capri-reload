@@ -7,6 +7,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from weather import weather_sources
+
 log = logging.getLogger("capri")
 
 
@@ -44,7 +46,7 @@ class WebSearch:
     def _fetch(query):
         from ddgs import DDGS
         return DDGS(timeout=4).text(query, region="ru-ru", max_results=4,
-                                   backend="google,brave,bing,duckduckgo")
+                                   backend="yandex,duckduckgo,yahoo")
 
     def ask(self, question):
         query = _text(question, 500)
@@ -54,6 +56,10 @@ class WebSearch:
             cached = self.cache.get(query)
             if cached and time.monotonic() - cached[0] < 120:
                 return [dict(item) for item in cached[1]]
+        weather = weather_sources(query)
+        if weather is not None:
+            # Только этот доверенный провайдер создаёт готовый числовой ответ.
+            return weather
         try:
             rows = self._fetch(query)
         except Exception as error:

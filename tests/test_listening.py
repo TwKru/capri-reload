@@ -62,6 +62,19 @@ class ListeningTests(unittest.TestCase):
         self.assertEqual(self.capri.router.ask.call_count, 3)
         self.assertEqual(self.capri.local.ask.call_count, 3)
 
+    def test_weather_answer_works_in_game_without_waiting_for_big_model(self):
+        self.capri.game_active = True
+        self.capri.actions.handle.return_value = Reply("погода в Краснообске", "research")
+        self.capri.ai.available = False
+        self.capri.local = Mock()
+        self.capri.web.ask.return_value = [{"title": "Погода", "url": "https://open-meteo.com/", "text": "Температура 3.",
+                                           "answer": "Краснообск: сейчас плюс 3 градуса."}]
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("найди погоду в Краснообске")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.local.ask.assert_not_called()
+        self.capri.say.assert_called_once_with("Краснообск: сейчас плюс 3 градуса.")
+
     def test_router_search_preserves_whole_question_and_runs_before_answer(self):
         self.capri.router = Mock()
         self.capri.router.ask.return_value = Decision("search", "Франция")
