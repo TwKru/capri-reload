@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 
 log = logging.getLogger("capri")
-ACTIONS = ["chat", "command", "music", "pause", "resume", "next", "prev", "shuffle_on", "shuffle_off",
+ACTIONS = ["chat", "command", "like", "music", "pause", "resume", "next", "prev", "shuffle_on", "shuffle_off",
            "repeat_track", "repeat_list", "repeat_off", "volume", "mute", "unmute", "gamma",
            "open", "search", "hide", "wave"]
 SCHEMA = {"type": "object", "properties": {
@@ -20,7 +20,7 @@ action: command=другая команда из возможностей Кап
 next/prev=следующая/предыдущая песня; shuffle_on/off=перемешать/отключить перемешивание;
 repeat_track/list/off=повтор песни/плейлиста/выключить повтор;
 volume=громкость, mute/unmute=звук выключить/включить; gamma=гамма экрана;
-open=открыть программу/сайт, search=найти в интернете, hide=спрячься, wave=помаши.
+like=поставить лайк текущей песне в YouTube Music, open=открыть программу/сайт, search=найти в интернете, hide=спрячься, wave=помаши.
 target: название программы, сайта или поисковый запрос; для общей громкости пустая строка.
 value: число или null. relative=true только для изменения громкости на величину, иначе false.
 Немного тише = value -10, relative true. Немного громче = value 10, relative true.
@@ -35,6 +35,8 @@ value: число или null. relative=true только для изменен�
 Сначала пойми смысл ВСЕЙ фразы. Не выполняй отрицания, цитаты, условные примеры и пересказ чужих слов.
 «Не выключай музыку» = chat. «Что значит слово заткнись» = chat.
 «Ты мне мешаешь, закройся уже» = hide; «Он сказал мне закройся» = chat.
+«Поставь лайк песне», «лайкни трек», «добавь песню в понравившиеся» = like.
+«Что такое лайк» = chat; «Не ставь лайк» = chat.
 «Продолжи» = resume; «некст» = next; «назад» = prev.
 «Походи по экрану», «обновись», «выключи компьютер» = command.
 Если ожидается подтверждение или выбор, ответ пользователя = command; не меняй его смысл.
@@ -74,7 +76,7 @@ class Decision:
                     "next": "следующий трек", "prev": "предыдущий трек", "shuffle_on": "перемешай песни",
                     "shuffle_off": "выключи перемешивание", "repeat_track": "зацикли песню",
                     "repeat_list": "зацикли плейлист", "repeat_off": "выключи повтор",
-                    "hide": "спрячься", "wave": "помаши"}
+                    "hide": "спрячься", "wave": "помаши", "like": "поставь лайк песне"}
         if self.action in commands:
             return commands[self.action]
         if self.action == "volume":
@@ -138,7 +140,7 @@ class IntentRouter:
             # вопрос-инструкцию или прямой запрет в действие при ошибке классификации.
             if self.is_question(question) or re.match(
                     r"^(?:пожалуйста\s+)?не\s+(?:выключай|включай|открывай|закрывай|"
-                    r"меняй|запускай|удаляй|перезагружай|прячься|замолкай|трогай)\b",
+                    r"меняй|запускай|удаляй|перезагружай|прячься|замолкай|трогай|ставь|лайкай|лайкни)\b",
                     question.strip(), re.IGNORECASE):
                 decision = Decision("chat")
             if context and (context.get("awaiting_confirmation") or context.get("awaiting_choice")):

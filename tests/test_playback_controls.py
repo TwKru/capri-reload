@@ -13,6 +13,14 @@ class PlaybackCommandTests(unittest.TestCase):
             self.app = Actions({}, ".", None)
         self.app.web = Mock()
 
+    def test_like_commands_use_music_page_and_report_only_verified_success(self):
+        for command in ("поставь лайк песне", "лайкни трек", "лайк", "добавь песню в понравившиеся"):
+            with self.subTest(command=command), patch("actions.media.music_page_control", return_value=True) as like:
+                self.assertEqual(self.app.handle(command).text, "Песне поставлен лайк.")
+                like.assert_called_once_with("like", True)
+        with patch("actions.media.music_page_control", return_value=False):
+            self.assertIn("Не удалось", self.app.handle("лайкни песню").text)
+
     def test_next_previous_phrases(self):
         for command, action in (("включи следующую песню", "next"), ("следующая песня", "next"),
                                 ("поставь предыдущую песню", "prev"), ("предыдущая песня", "prev"),
@@ -115,6 +123,44 @@ class MusicPageTests(unittest.TestCase):
                 patch.object(media.time, "sleep"):
             result = media.music_page_control(action, value)
             return result, click.call_count
+
+    def test_like_is_verified_and_repeat_request_does_not_unlike(self):
+        for label in ("Нравится", "Like this song"):
+            button = types.SimpleNamespace(CurrentName=label, CurrentIsEnabled=True,
+                                           CurrentAriaProperties="pressed=false")
+            def invoke(b):
+                b.CurrentAriaProperties = "pressed=true"
+            self.assertEqual(self.execute("like", True, button, invoke), (True, 1))
+            self.assertEqual(self.execute("like", True, button, invoke), (True, 0))
+
+    def test_like_reads_chromium_toggle_pattern_without_aria_properties(self):
+        button = Mock(CurrentName="Нравится", CurrentIsEnabled=True, CurrentAriaProperties="")
+        toggle = button.GetCurrentPattern.return_value.QueryInterface.return_value
+        toggle.CurrentToggleState = 0
+        def invoke(b):
+            toggle.CurrentToggleState = 1
+        self.assertEqual(self.execute("like", True, button, invoke), (True, 1))
+        self.assertEqual(self.execute("like", True, button, invoke), (True, 0))
+        toggle.CurrentToggleState = 2
+        self.assertEqual(self.execute("like", True, button, invoke), (False, 0))
+
+    def test_like_without_state_never_toggles_blindly(self):
+        button = types.SimpleNamespace(CurrentName="Нравится", CurrentIsEnabled=True, CurrentAriaProperties="")
+        self.assertEqual(self.execute("like", True, button, lambda b: None), (False, 0))
+        button.CurrentAriaProperties = "pressed=false"
+        self.assertEqual(self.execute("like", True, button, lambda b: None), (False, 1))
+
+    def test_dislike_cannot_be_used_as_like(self):
+        for label in ("Не нравится", "Dislike", "Remove dislike", "Больше не нравится"):
+            button = types.SimpleNamespace(CurrentName=label, CurrentIsEnabled=True, CurrentAriaProperties="pressed=false")
+            self.assertEqual(self.execute("like", True, button, lambda b: None), (False, 0))
+
+    def test_like_rejects_other_domains_without_clicking(self):
+        with patch("automation.find_window", return_value=123), patch.object(media, "_music_buttons") as buttons:
+            for url in (None, "https://youtube.com/watch?v=1", "https://music.youtube.com.example.org/"):
+                with patch.object(media, "browser_url", return_value=url):
+                    self.assertFalse(media.music_page_control("like", True))
+            buttons.assert_not_called()
 
     def test_repeat_cycles_until_requested_state_then_stops(self):
         button = types.SimpleNamespace(CurrentName="Повтор отключен", CurrentIsEnabled=True,

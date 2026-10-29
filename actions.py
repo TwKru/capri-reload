@@ -999,6 +999,12 @@ REPLY_RE = (r"^((когда|если) (я )?(говорю|скажу|произ�
 FORGET_REPLY_RE = r"^(забудь|удали|убери) (свой |мой |этот )?ответ (на|для) (фразу |слова |вопрос )?(?P<p>.+)$"
 
 
+LIKE_RE = (r"^(?:(?:поставь|поставить|добавь) )?лайк(?:ни)?"
+           r"(?: (?:этой|текущей|эту|этот|текущий|на эту|на текущую))?"
+           r"(?: (?:песне|песню|треку|трек|композиции))?$|"
+           r"^(?:добавь|сохрани) (?:эту |текущую )?(?:песню|трек) в (?:понравившиеся|любимые)$")
+
+
 class Actions:
     def __init__(self, cfg, base_dir, ai, save=None):
         self.cfg = cfg
@@ -1080,6 +1086,7 @@ class Actions:
              r"( песни| треки| музыку| плейлист| очередь)?$|^(shuffle|шаффл|шафл)( песни| музыку| songs)?$|"
              r"^(включи|выключи|отключи|убери) (перемешивание|случайный порядок|шаффл)$|"
              r"^(играй|включи музыку) (в случайном порядке|вперемешку)$", self.media_shuffle),
+            (LIKE_RE, self.media_like),
             (r"что (сейчас )?(играет|звучит|за (песн|трек|музык|видео)\w*)", self.media_info),
             (r"^(поставь|включи|начни|запусти|давай|играй|воспроизведи)( видео| музык\w*| трек| песн\w*| ролик)? "
              r"(на|с|со) "
@@ -1159,6 +1166,8 @@ class Actions:
         if re.fullmatch(r"поспи|спи|подремли|отдохни|ложись спать|иди спать|проснись|просыпайся|вставай|"
                         r"танцуй|станцуй|потанцуй|давай потанцуем|покажи танец", c):
             return True
+        if re.fullmatch(LIKE_RE, c):
+            return True
         if len(c.split()) > 10:
             return False
         if re.fullmatch(r"обновись|обнови (себя|капри)|проверь обновления|установи обновления|скачай обновления", c):
@@ -1225,7 +1234,7 @@ class Actions:
                     "shuffle_off": self.media_shuffle, "repeat_track": self.media_repeat,
                     "repeat_list": self.media_repeat, "repeat_off": self.media_repeat,
                     "volume": self.volume, "mute": self.volume, "unmute": self.volume,
-                    "hide": self.hide, "wave": self.wave}
+                    "hide": self.hide, "wave": self.wave, "like": self.media_like}
         if decision.action in handlers:
             return handlers[decision.action](command, None)
         if decision.action == "gamma":
@@ -1662,6 +1671,11 @@ class Actions:
         if not self._set_playback_mode("shuffle", enabled):
             return Reply("Не удалось изменить перемешивание. Открой вкладку YouTube Music или плеер с поддержкой перемешивания.")
         return Reply("Песни перемешаны." if enabled else "Перемешивание выключено.")
+
+    def media_like(self, c, m):
+        if media.music_page_control("like", True):
+            return Reply("Песне поставлен лайк.")
+        return Reply("Не удалось подтвердить лайк. Открой вкладку YouTube Music с текущей песней и проверь вход в аккаунт.")
 
     def media_info(self, c, m):
         info = media.now_playing()

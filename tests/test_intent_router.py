@@ -66,7 +66,7 @@ class RouterTests(unittest.TestCase):
                 Decision("open", target).command()
 
     def test_questions_and_prohibitions_are_classified_but_never_executed(self):
-        for phrase in ("Как выключить компьютер?", "не выключай музыку"):
+        for phrase in ("Как выключить компьютер?", "не выключай музыку", "не ставь лайк"):
             body = {"message": {"content": json.dumps(decision("music"))}}
             with patch("intent_router.urllib.request.urlopen",
                        return_value=io.BytesIO(json.dumps(body).encode())) as request:

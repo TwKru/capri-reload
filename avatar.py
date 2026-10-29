@@ -797,16 +797,23 @@ class Avatar(QWidget):
         self.timer.start(33)
         self.stop_roam()
         if self.state in ("visible", "appearing"):
+            if self.game_mode:
+                self.state, self.k = "visible", 0
+                self.render()
+                self.update()
             if not self.isVisible():
                 self.show()
-                self.raise_()
+            self.raise_()
             self.burst, self.burst_level = 6, 0.9
             return
         if len(self.poses) > 1:  # каждое появление — в случайной позе
             self.change_pose(random.randrange(len(self.poses)))
         if not self.user_moved:
             self.move_to_named("bottom-left")  # появляемся слева снизу, над панелью задач
-        self.state, self.k = "appearing", 0
+        self.state, self.k = ("visible" if self.game_mode else "appearing"), 0
+        if self.game_mode:
+            self.render()
+            self.update()
         self.next_spin = time.time() + (random.uniform(5, 9) if random.random() < .4 else random.uniform(25, 60))
         self.hide_at = 0
         self.show()

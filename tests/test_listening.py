@@ -28,6 +28,22 @@ class ListeningTests(unittest.TestCase):
         self.modes = []
         self.capri.mode.connect(lambda mode, seconds: self.modes.append(mode))
 
+    def test_name_in_game_appears_with_sound_before_command_processing(self):
+        self.capri.game_active = True
+        self.capri.glitch_wav = "appearance.wav"
+        with patch("main.play_sound_async") as sound, patch.object(self.capri, "_ask_ai") as ai:
+            self.capri.on_partial("капри")
+            self.assertIn("listening", self.modes)
+            sound.assert_called_once_with("appearance.wav")
+            ai.assert_not_called()
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_final_wake_command_appears_even_without_partial_result(self):
+        with patch.object(self.capri, "appear") as appear:
+            self.capri.on_final("капри поставь лайк песне", b"audio")
+        appear.assert_called_once()
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "поставь лайк песне")
+
     def test_question_accepts_one_reply_without_name(self):
         self.capri.actions.handle.return_value = Reply("Какую музыку ты любишь?")
         self.capri.on_final("капри поговорим", b"audio")

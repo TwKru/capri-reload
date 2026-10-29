@@ -121,6 +121,19 @@ def _music_buttons(hwnd):
     return [buttons.GetElement(i) for i in range(buttons.Length)]
 
 
+def _music_toggle_state(button):
+    """Chromium может отдавать aria-pressed через TogglePattern, а не AriaProperties."""
+    try:
+        from comtypes.gen import UIAutomationClient as UIA
+        toggle = button.GetCurrentPattern(UIA.UIA_TogglePatternId).QueryInterface(UIA.IUIAutomationTogglePattern)
+        state = toggle.CurrentToggleState
+        if state in (0, 1):
+            return bool(state)
+    except Exception:
+        pass
+    return None
+
+
 def _music_button_info(button):
     """Опознать кнопку и текущее состояние по доступному названию YouTube Music."""
     name = (button.CurrentName or "").lower().replace("ё", "е")
@@ -132,6 +145,17 @@ def _music_button_info(button):
         return "next", None
     if re.fullmatch(r"(previous( song| track)?|назад|предыдущ(ая песня|ая композиция|ий трек))(\s*\(.*\))?", name):
         return "prev", None
+    # Не путать с отдельной кнопкой «Не нравится» / Dislike.
+    label = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    if re.fullmatch(r'снять отметку [«"“]?нравится[»"”]?|убрать лайк|unlike|remove like', label):
+        return "like", True
+    if re.fullmatch(r'нравится|like|like this song|i like this|поставить отметку [«"“]?нравится[»"”]?', label):
+        props = (getattr(button, "CurrentAriaProperties", "") or "").lower()
+        pressed = re.search(r"\bpressed=(true|false)\b", props)
+        state = pressed.group(1) == "true" if pressed else _music_toggle_state(button)
+        if label.startswith("поставить отметку"):
+            state = False
+        return "like", state
     if re.search(r"shuffle|перемеш|случайн.*поряд", name):
         if re.search(r"выключить|отключить|turn off|disable", name):
             return "shuffle", True
@@ -171,6 +195,7 @@ def music_page_control(action, value=None):
         url = browser_url(hwnd)
         if not url or urllib.parse.urlparse(url).hostname != "music.youtube.com":
             return False
+        like_invoked = False
         for _ in range(4):  # у повтора три состояния; не переключаем режим вслепую
             button = next((b for b in _music_buttons(hwnd)
                            if b.CurrentIsEnabled and _music_button_info(b)[0] == action), None)
@@ -197,7 +222,11 @@ def music_page_control(action, value=None):
                 return False
             if state == value:
                 return True
+            if action == "like" and like_invoked:
+                time.sleep(0.15)  # ждём обновления состояния; второй клик снял бы лайк
+                continue
             _invoke_music_button(button)
+            like_invoked = action == "like"
             time.sleep(0.15)
         return False
     except Exception:

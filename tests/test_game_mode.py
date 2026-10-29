@@ -38,6 +38,20 @@ class AvatarGamingTests(unittest.TestCase):
         self.addCleanup(self.avatar.overlay.close)
         self.addCleanup(self.avatar.close)
 
+    def test_game_summon_draws_immediately_and_raises_without_activation(self):
+        self.avatar.set_game_mode(True)
+        with patch.object(self.avatar, "render") as render, patch.object(self.avatar, "raise_") as raise_window:
+            self.avatar.summon()
+            self.assertEqual(self.avatar.state, "visible")
+            render.assert_called_once()
+            raise_window.assert_called_once()
+            self.assertTrue(self.avatar.isVisible())
+            self.avatar.summon()
+            self.assertEqual(raise_window.call_count, 2)
+            self.assertEqual(self.avatar.state, "visible")
+        from PySide6.QtCore import Qt
+        self.assertTrue(self.avatar.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating))
+
     def test_game_mode_keeps_avatar_and_blocks_lightning(self):
         self.avatar.set_game_mode(True)
         with patch.object(self.avatar.overlay, "strike") as strike:

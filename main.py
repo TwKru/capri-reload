@@ -444,7 +444,7 @@ class Capri(QObject):
         return re.sub(r"^[\s,.!?]+|[\s,.!?]+$", "", t)
 
     def appear(self, seconds):
-        if self.glitch_wav and not self.game_active:
+        if self.glitch_wav:
             play_sound_async(self.glitch_wav)
         self.summon.emit()
         self.mode.emit("listening", float(seconds))
@@ -582,6 +582,9 @@ class Capri(QObject):
         self.awake_until = 0
         self.answer_until = 0.0
         self.command_serial += 1
+        if woke and now - self.last_partial_wake > 3:
+            self.last_partial_wake = now
+            self.appear(self.cfg["listen_window_seconds"])
         self.jobs.put(("voice", cmd, audio, woke, self.voice_generation))
 
     def on_listener_error(self, err, kind="mic"):
