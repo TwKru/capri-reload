@@ -156,6 +156,10 @@ def main():
     say("[Capri] Скачиваю маленькую модель-диспетчер qwen3:0.6b (~523 МБ)...")
     if subprocess.run([exe, "pull", "qwen3:0.6b"]).returncode != 0:
         say("[Capri] Диспетчер пока не скачался. Капри будет работать без него; повтори setup_ai.bat позже.")
+    if model != "qwen3:1.7b":
+        say("[Capri] Скачиваю разговорную модель для игр qwen3:1.7b (~1,4 ГБ)...")
+        if subprocess.run([exe, "pull", "qwen3:1.7b"]).returncode != 0:
+            say("[Capri] Лёгкая модель не скачалась. Повтори setup_ai.bat или ollama pull qwen3:1.7b.")
     say("[Capri] Перезапусти Капри (значок в трее -> «Выход», затем run.bat) — и можно болтать.")
     return 0
 

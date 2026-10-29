@@ -266,6 +266,10 @@ class LocalAI:
         except Exception as e:
             log.info("Не удалось прогреть модель: %s", e)
 
+    @staticmethod
+    def release_model(model):
+        _post("/api/generate", {"model": model, "keep_alive": 0}, 5)
+
     def release_memory(self):
         _post("/api/generate", {"model": self.model, "keep_alive": 0}, 5)
 
@@ -408,7 +412,7 @@ class LocalAI:
         self.history.append({"role": "assistant", "content": answer})
         return answer
 
-    def chatter(self):
+    def chatter(self, _question=None):
         """Короткая спонтанная реплика, когда Капри появляется сама. None — если модель недоступна."""
         try:
             text = self._chat([

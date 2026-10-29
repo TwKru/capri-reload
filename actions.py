@@ -1012,6 +1012,7 @@ class Actions:
         self.youtube_opened_at = 0.0  # когда Капри последний раз открывала YouTube
         self.media_paused = None      # какой плеер Капри поставила на паузу
         self.local = None
+        self.local_reply = None
         self.routes = [
             (r"^(выход|выключись|отключись|заверши работу|завершить работу)$", self.quit),
             (r"^(спрячься|скройся|исчезни|пока|отбой|свободна)\b|"
@@ -2138,7 +2139,7 @@ class Actions:
         use_ai = self.cfg.get("enable_ai") and self.ai and self.ai.available
         spoken = self.ai.summarize_report(report) if use_ai else None
         if not spoken and self.local:
-            spoken = self.local.summarize_report(report)
+            spoken = self.local_reply("summarize_report", report) if self.local_reply else self.local.summarize_report(report)
         if spoken:
             return Reply(spoken)
         if not issues:

@@ -59,6 +59,7 @@ try:
     from actions import CAPRI_URL, Actions, Reply
     from ai import AI
     from local_ai import LocalAI
+    from model_policy import ConversationModels
     from intent_router import IntentRouter
     from web_search import WebSearch
     from request_planner import RequestPlan, compact_sources, fallback_plan
@@ -76,6 +77,9 @@ except ImportError as e:
 DEFAULTS = {
     "enable_ai": False,
     "local_ai": True,
+    "use_light_model_in_games": True,
+    "game_chat_model": "qwen3:1.7b",
+    "game_executables": [],
     "local_model": "qwen3:8b",
     "local_keep_alive": "30m",
     "local_timeout_seconds": 15,
@@ -283,6 +287,7 @@ class Capri(QObject):
         self.ai = AI(cfg)
         self.ai.personality = self.personality
         self.local = LocalAI(cfg) if cfg.get("local_ai") else None
+        self.conversation_models = ConversationModels(cfg)
         self.router = IntentRouter(cfg) if cfg.get("intent_router", True) else None
         self.web = WebSearch()
         self.last_web_sources = []
@@ -294,6 +299,7 @@ class Capri(QObject):
         self.config_mtime = self._config_mtime()
         self.zapret_checked = False  # предлагали ли уже исправить zapret в этом сеансе
         self.actions.local = self.local
+        self.actions.local_reply = self._local_reply
         self.speaker = Speaker(cfg)
         self.cancel_epoch = 0
         self.cancel_lock = threading.Lock()
@@ -326,7 +332,16 @@ class Capri(QObject):
         if self.local:
             def start_local():
                 with self.ai_call_lock:
-                    self.local.start_server()
+                    normal = self.local.model
+                    selected = self.conversation_models.choose(normal, self.local.installed)
+                    self.conversation_models.prepare(selected, normal, self.local.release_model)
+                    warmup = copy.copy(self.local)
+                    warmup.model = selected
+                    if selected != normal:
+                        warmup.on_model_change = None
+                    warmup.start_server()
+                    if selected == normal:
+                        self.local.model = warmup.model
             self._background(start_local)
         if self.router:
             self._background(self.router.warmup)
@@ -419,7 +434,7 @@ class Capri(QObject):
         elif self.personality.enabled:
             text = self.personality.chatter_line()
         elif self.local and random.random() < 0.4:
-            text = self.local.chatter()
+            text = self._local_reply("chatter", "")
         for _ in range(5):
             if text and text not in self.recent_chatter:
                 break
@@ -767,6 +782,13 @@ class Capri(QObject):
             finally:
                 self.jobs.task_done()
 
+    def _local_reply(self, method, question):
+        epoch = self.cancel_epoch
+        result = self._ask_ai(self.local, question, lambda: epoch != self.cancel_epoch, method=method)
+        if result is AI_CANCELLED:
+            raise cancellation.RequestCancelled()
+        return result
+
     def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None, evidence=None, answer_tokens=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
         call_lock = lock if lock is not None else self.ai_call_lock
@@ -801,6 +823,10 @@ class Capri(QObject):
 
         def ask():
             try:
+                if isinstance(working, LocalAI) and getattr(working, "model", None):
+                    selected = self.conversation_models.choose(working.model, working.installed)
+                    self.conversation_models.prepare(selected, ai.model, working.release_model)
+                    working.model = selected
                 if on_sentence and isinstance(working, LocalAI):
                     kwargs = {"on_sentence": sentence}
                     if evidence is not None:
