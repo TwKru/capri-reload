@@ -168,7 +168,7 @@ class Listener(threading.Thread):
 
             device = resolve_device(self.device_name)
             try:
-                stream = sd.RawInputStream(samplerate=RATE, blocksize=4000, dtype="int16", channels=1,
+                stream = sd.RawInputStream(samplerate=RATE, blocksize=1600, dtype="int16", channels=1,
                                            callback=callback, device=device)
             except Exception as e:
                 if device is not None:  # выбранный микрофон не открылся — пробуем микрофон по умолчанию

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import updater
+from dismissal import CANDIDATE as DISMISS_RE, dismissal_hint
 from game_mode import fullscreen_app_active
 from personality import Personality
 
@@ -238,7 +239,7 @@ def load_config():
 
 
 STOP_RE = re.compile(r"\b(стоп|хватит|молчи|замолчи|помолчи|достаточно|подожди|остановись|перестань|"
-                     r"заткнись|умолкни)\b")
+                     r"умолкни)\b")
 
 
 class Capri(QObject):
@@ -260,7 +261,7 @@ class Capri(QObject):
         self.personality = Personality(enabled=bool(cfg.get("personality", True)))
         self._last_mood = None
         words = sorted(cfg["wake_words"], key=len, reverse=True)
-        self.wake_re = re.compile(r"(^|\s)(" + "|".join(map(re.escape, words)) + r")(?=\s|$|[,.!?])",
+        self.wake_re = re.compile(r"(?<!\w)(" + "|".join(map(re.escape, words)) + r")(?=\s|$|[,.!?])",
                                   re.IGNORECASE)
         self.ai = AI(cfg)
         self.ai.personality = self.personality
@@ -457,7 +458,7 @@ class Capri(QObject):
 
     def is_stop_command(self, text):
         cmd = self.strip_wake(text).strip()
-        return bool(STOP_RE.match(cmd))
+        return bool(re.fullmatch(r"(?:стоп|хватит|достаточно|подожди|остановись|перестань)[\s,.!?]*", cmd))
 
     def stop_listening(self):
         """Вернуться к ожиданию имени и отменить ещё не выполненные голосовые задания."""
@@ -485,7 +486,11 @@ class Capri(QObject):
             return
         if self.speaking:
             if self.cfg.get("barge_in") and self.wants_interrupt(text):
+                refresh = self.has_wake(text) and (not self.interrupted or now - self.last_partial_wake > 3)
                 self.interrupt()
+                if refresh:
+                    self.last_partial_wake = now
+                    self.appear(self.cfg["listen_window_seconds"])
             return
         if self.has_wake(text) and (now > self.awake_until or now - self.last_partial_wake > 3):
             self.last_partial_wake = now
@@ -504,14 +509,15 @@ class Capri(QObject):
         if self.is_stop_command(text) and not echo:
             self.stop_listening()
             return
+        dismissal = bool(DISMISS_RE.search(text)) and not echo
         if self.speaking and not self.interrupted:
-            if not (self.cfg.get("barge_in") and self.wants_interrupt(text)):
+            if not (dismissal or (self.cfg.get("barge_in") and self.wants_interrupt(text))):
                 return  # эхо собственной речи
             self.interrupt()
         if now - self.speech_end < 1.0 and self.is_echo(text):
             return
         woke = self.has_wake(text)
-        if not woke and now > self.awake_until:
+        if not woke and now > self.awake_until and not (dismissal and dismissal_hint(text) is True):
             return
         cmd = self.strip_wake(text) if woke else text
         if len(cmd) < 2:
@@ -670,7 +676,7 @@ class Capri(QObject):
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
 
-    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None):
+    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask"):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
         call_lock = lock if lock is not None else self.ai_call_lock
         while not call_lock.acquire(blocking=False):
@@ -705,7 +711,7 @@ class Capri(QObject):
                 if on_sentence and isinstance(working, LocalAI):
                     result[0] = working.ask(question, on_sentence=sentence)
                 else:
-                    result[0] = working.ask(question)
+                    result[0] = getattr(working, method)(question)
             except Exception:
                 log.exception("Ошибка запроса к ИИ")
             finally:
@@ -771,7 +777,7 @@ class Capri(QObject):
             self.summon.emit()
             self.mode.emit("thinking", 0.0)
             self.subtitle.emit("> " + cmd)
-            if self.cfg.get("use_google_stt") and not self.actions.is_fast_command(cmd):
+            if self.cfg.get("use_google_stt") and not DISMISS_RE.search(cmd) and not self.actions.is_fast_command(cmd):
                 better = google_stt(audio)
                 if better:
                     better = better.lower()
@@ -803,11 +809,23 @@ class Capri(QObject):
         if cancelled():
             return
 
-        reply = self.actions.handle(cmd)
+        dismissal = bool(DISMISS_RE.search(cmd))
+        if dismissal:
+            hide = dismissal_hint(cmd)
+            if hide is None and self.router:
+                hide = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
+                                    lock=self.router_call_lock, method="classify_dismissal")
+                if hide is AI_CANCELLED or cancelled():
+                    return
+            if hide is True:
+                self.stop_listening()
+                self.vanish.emit()
+                return
+        reply = None if dismissal else self.actions.handle(cmd)
         self.sync_personality()
         if cancelled():
             return
-        if self.router and (reply is None or reply.action == "unresolved"):
+        if not dismissal and self.router and (reply is None or reply.action == "unresolved"):
             decision = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
                                     lock=self.router_call_lock)
             if decision is AI_CANCELLED:
@@ -839,7 +857,9 @@ class Capri(QObject):
                 answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence) if self.local else None
                 if answer is AI_CANCELLED or cancelled():
                     return
-                reply = Reply(answer, "answer") if answer else self.actions.fallback(cmd, force_search=bool(self.local))
+                reply = (Reply(answer, "answer") if answer else
+                         Reply("Если хочешь, чтобы я исчезла с экрана, скажи: Капри, спрячься.", "answer")
+                         if dismissal else self.actions.fallback(cmd, force_search=bool(self.local)))
         if cancelled():
             return
         if streamed:

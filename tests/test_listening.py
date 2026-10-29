@@ -26,6 +26,46 @@ class ListeningTests(unittest.TestCase):
         self.modes = []
         self.capri.mode.connect(lambda mode, seconds: self.modes.append(mode))
 
+    def test_dismissal_waits_for_full_sentence_and_hides_without_speech(self):
+        self.capri.on_partial("капри заткнись")
+        self.assertGreater(self.capri.awake_until, time.time())
+        hidden = []
+        self.capri.vanish.connect(lambda: hidden.append(True))
+        self.capri.on_final("капри заткнись пожалуйста", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(hidden, [True])
+        self.assertEqual(self.capri.awake_until, 0)
+        self.capri.speaker.say.assert_not_called()
+        self.capri.actions.handle.assert_not_called()
+
+    def test_negative_and_quoted_dismissals_cannot_reach_action_router(self):
+        self.capri.router = Mock()
+        self.capri.ai.available = False
+        for text in ("капри не закрывайся", "капри что значит слово заткнись", "капри он сказал «закройся»"):
+            self.capri.on_final(text, b"audio")
+            self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.handle.assert_not_called()
+        self.capri.router.ask.assert_not_called()
+        self.capri.router.classify_dismissal.assert_not_called()
+
+    def test_ambiguous_request_uses_context_classifier(self):
+        self.capri.router = main.IntentRouter({})
+        hidden = []
+        self.capri.vanish.connect(lambda: hidden.append(True))
+        with patch.object(self.capri.router, "classify_dismissal", return_value=True) as classify:
+            self.capri.on_final("капри ты мне мешаешь закройся уже", b"audio")
+            self.capri._process(self.capri.jobs.get_nowait())
+        classify.assert_called_once_with("ты мне мешаешь закройся уже")
+        self.assertEqual(hidden, [True])
+
+    def test_name_interrupt_immediately_refreshes_avatar(self):
+        self.capri.speaking = True
+        self.capri.speaker.playing = False
+        with patch.object(self.capri, "appear") as appear:
+            self.capri.on_partial("эй,капри")
+        appear.assert_called_once()
+        self.assertGreater(self.capri.awake_until, time.time())
+
     def test_unrelated_speech_is_ignored_until_called(self):
         self.capri.on_final("открой ютуб", b"audio")
         self.assertTrue(self.capri.jobs.empty())
