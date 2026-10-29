@@ -30,13 +30,20 @@ class DesktopInteractionTests(unittest.TestCase):
     def test_clips_are_lazy_and_share_bounded_memory(self):
         self.assertEqual(len(avatar.SpriteStripFrames.strips), 0)
         self.assertEqual(len(avatar.SpriteStripFrames.cache), 0)
-        for name in ("idle", "blink", "grin", "drag", "sleep", "wake", "dance"):
+        for name in ("grin", "drag", "sleep", "wake", "dance"):
             frames = self.view.anims["desktop_" + name]
             for index in range(len(frames)):
                 self.assertFalse(frames[index].isNull())
                 self.assertLessEqual(len(frames.strips), 1)
                 self.assertLessEqual(len(frames.cache), 8)
         self.assertNotEqual(self.view.anims["desktop_sleep"][0], self.view.anims["desktop_wake"][4])
+
+    def test_imported_standing_loops_are_not_loaded(self):
+        self.assertNotIn("desktop_idle", self.view.anims)
+        self.assertNotIn("desktop_blink", self.view.anims)
+        folder = self.assets / "desktop_sprites"
+        self.assertFalse((folder / "idle.png").exists())
+        self.assertFalse((folder / "blink.png").exists())
 
     def test_pat_requires_repeated_strokes_and_has_cooldown(self):
         events = []
@@ -80,7 +87,7 @@ class DesktopInteractionTests(unittest.TestCase):
         self.assertEqual(self.view.anim, "eyes")
         self.view.set_mode("speaking")
         with patch("avatar.time.time", return_value=100):
-            self.assertEqual(self.view._figure(), self.view.anims["desktop_idle"][0])
+            self.assertEqual(self.view._figure(), self.view.base)
 
     def test_game_mode_keeps_idle_static_and_allows_explicit_dance(self):
         self.view.set_game_mode(True)

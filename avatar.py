@@ -497,7 +497,7 @@ class SpriteStripFrames:
 
 
 def load_desktop_anims(folder):
-    clips = {"idle": ("idle", 16, 8), "blink": ("blink", 4, 8), "grin": ("grin", 16, 8),
+    clips = {"grin": ("grin", 16, 8),
              "drag": ("dangle", 24, 10), "sleep": ("sleep", 16, 6), "wake": ("wake", 13, 15),
              "dance": ("dance", 16, 12)}
     result = {}
@@ -600,7 +600,6 @@ class Avatar(QWidget):
         self.anims = load_anims(os.path.join(assets_dir, "anim"))
         self.anims.update(load_desktop_anims(os.path.join(assets_dir, "desktop_sprites")))
         self.idle_started = time.time()
-        self.next_blink = time.time() + random.uniform(3, 7)
         self.sleeping = False
         self.dance_until = 0.0
         self._drag_started = 0.0
@@ -901,22 +900,18 @@ class Avatar(QWidget):
             self.render()
             self.update()
             return
-        elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None
-              and self.anim is None and self.roam_img is None and "desktop_sleep" not in self.anims and not self.game_mode and "desktop_blink" in self.anims and now >= self.next_blink):
-            self.play_anim("desktop_blink")
-            self.next_blink = now + random.uniform(3, 7)
         elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None and self.anim is None and
               not self.game_mode and "spin" in self.anims and now >= self.next_spin):
             self.play_anim("spin")
             self.next_spin = now + random.uniform(25, 60)
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
-              and self.mode != "thinking" and not self.sleeping and "desktop_idle" not in self.anims):
+              and self.mode not in ("idle", "listening", "thinking") and not self.sleeping):
             self.change_pose()
         elif self.state == "visible" and self.hide_at and now > self.hide_at:
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        smooth = self.game_mode or self.roaming or "desktop_idle" in self.anims or self.anim in ("spin", "walk")
+        smooth = self.game_mode or self.roaming or self.roam_img is not None or self.anim in ("spin", "walk")
         if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
@@ -948,10 +943,6 @@ class Avatar(QWidget):
             return self.roam_img
         if self.mode in ("idle", "listening") and "desktop_sleep" in self.anims:
             frames = self.anims["desktop_sleep"]
-            index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)
-            return frames[index]
-        if "desktop_idle" in self.anims:
-            frames = self.anims["desktop_idle"]
             index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)
             return frames[index]
         if self.eye_pos is None:
