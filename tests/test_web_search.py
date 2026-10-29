@@ -52,6 +52,14 @@ class ResearchRoutingTests(unittest.TestCase):
         self.actions.fallback("почему небо голубое", force_search=True)
         self.actions.web.assert_not_called()
 
+    def test_failed_response_does_not_claim_or_offer_browser_search(self):
+        import persona
+        for variant in persona.LINES["dont_know"]:
+            with patch("persona.random.choice", return_value=variant):
+                reply = self.actions.fallback("ты чмо иди на хер", force_search=True)
+            self.assertNotRegex(reply.text.lower(), r"поиск|поищу|сети|загугли|найди")
+        self.actions.web.assert_not_called()
+
     def test_explicit_browser_search_still_opens_browser(self):
         self.actions.handle("открой поиск в браузере почему небо голубое")
         self.actions.web.assert_called_once()

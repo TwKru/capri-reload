@@ -26,6 +26,15 @@ class PersonalityTests(unittest.TestCase):
             self.assertTrue(reply)
             self.assertNotIn("сайт", reply)
 
+    def test_misunderstood_insult_is_a_local_reaction_not_a_search_request(self):
+        phrase = "ты чмо иди на хер"
+        self.assertTrue(self.person.can_handle(phrase))
+        self.assertTrue(self.person.react(phrase).reply)
+        self.assertTrue(self.person.strongly_hurt)
+        other = Personality(persist=False)
+        self.assertIsNone(other.react("найди фразу ты чмо иди на хер").reply)
+        self.assertFalse(other.strongly_hurt)
+
     def test_hurt_expires_and_apology_reconciles_immediately(self):
         reaction = self.person.react("Ты тупая!")
         self.assertTrue(reaction.reply)
