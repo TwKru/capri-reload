@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from intent_router import Decision
 from unittest.mock import Mock, patch
 
 from actions import Actions, Reply
@@ -196,7 +197,7 @@ class PersonalityCommandTests(unittest.TestCase):
         self.assertIsNone(self.actions.choice)
         self.assertEqual(self.actions.personality.mood, "hurt")
 
-    def test_fast_social_commands_skip_google_and_both_models(self):
+    def test_social_request_passes_router_but_skips_google_and_big_model(self):
         cfg = copy.deepcopy(main.DEFAULTS)
         cfg.update(local_ai=False, intent_router=False, use_google_stt=True)
         with patch.object(main, "Actions", return_value=self.actions), patch.object(main, "Speaker"), \
@@ -207,12 +208,14 @@ class PersonalityCommandTests(unittest.TestCase):
         capri.local = Mock()
         capri.say = Mock(return_value=False)
         capri.reload_config_if_changed = Mock()
-        with patch.object(main, "google_stt") as google, patch.object(capri, "_ask_ai") as ai:
+        with patch.object(main, "google_stt") as google, patch.object(capri, "_ask_ai", return_value=Decision("chat")) as ai:
             capri._process(("voice", "ты тупая", b"audio", True, 0))
         self.assertEqual(capri.personality.mood, "hurt")
         capri.say.assert_called_once()
         google.assert_not_called()
-        ai.assert_not_called()
+        ai.assert_called_once()
+        self.assertIs(ai.call_args.args[0], capri.router)
+        capri.local.ask.assert_not_called()
 
 
 if __name__ == "__main__":

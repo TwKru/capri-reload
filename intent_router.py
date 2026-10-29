@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 
 log = logging.getLogger("capri")
-ACTIONS = ["chat", "music", "pause", "resume", "next", "prev", "shuffle_on", "shuffle_off",
+ACTIONS = ["chat", "command", "music", "pause", "resume", "next", "prev", "shuffle_on", "shuffle_off",
            "repeat_track", "repeat_list", "repeat_off", "volume", "mute", "unmute", "gamma",
            "open", "search", "hide", "wave"]
 SCHEMA = {"type": "object", "properties": {
@@ -16,7 +16,7 @@ SCHEMA = {"type": "object", "properties": {
     "value": {"type": ["number", "null"]}, "relative": {"type": "boolean"}},
     "required": ["action", "target", "value", "relative"], "additionalProperties": False}
 SYSTEM = """Ты диспетчер голосовых команд. Верни только JSON по схеме. Не отвечай пользователю.
-action: chat=вопрос/разговор/объяснение; music=включить музыку; pause=пауза; resume=продолжить;
+action: command=другая команда из возможностей Капри (походить, танцевать, спать, настройки, программы, компьютер, цепочка действий), ответ на уточнение или подтверждение; chat=вопрос/разговор/объяснение; music=включить музыку; pause=пауза; resume=продолжить;
 next/prev=следующая/предыдущая песня; shuffle_on/off=перемешать/отключить перемешивание;
 repeat_track/list/off=повтор песни/плейлиста/выключить повтор;
 volume=громкость, mute/unmute=звук выключить/включить; gamma=гамма экрана;
@@ -32,6 +32,12 @@ value: число или null. relative=true только для изменен�
 "Можешь поставить громкость браузера на тридцать?" -> {"action":"volume","target":"браузер","value":30,"relative":false}
 "Что такое гамма?" -> {"action":"chat","target":"","value":null,"relative":false}
 "Как выключить компьютер?" -> {"action":"chat","target":"","value":null,"relative":false}
+Сначала пойми смысл ВСЕЙ фразы. Не выполняй отрицания, цитаты, условные примеры и пересказ чужих слов.
+«Не выключай музыку» = chat. «Что значит слово заткнись» = chat.
+«Ты мне мешаешь, закройся уже» = hide; «Он сказал мне закройся» = chat.
+«Продолжи» = resume; «некст» = next; «назад» = prev.
+«Походи по экрану», «обновись», «выключи компьютер» = command.
+Если ожидается подтверждение или выбор, ответ пользователя = command; не меняй его смысл.
 Вопросы о возможностях и инструкции всегда chat. Не придумывай действий, которых нет в списке."""
 
 
@@ -109,14 +115,16 @@ class IntentRouter:
         return bool(re.match(r"^(как\b|почему\b|зачем\b|что такое\b|кто\b|можно ли\b|объясни\b|расскажи\b)",
                              question.strip(), re.IGNORECASE))
 
-    def ask(self, question):
-        if self.is_question(question):
-            return Decision("chat")
+    def ask(self, question, context=None):
         if self.warming or time.monotonic() < self.retry_at:
             return None
         started = time.monotonic()
-        payload = {"model": self.model, "messages": [{"role": "system", "content": SYSTEM},
-                   {"role": "user", "content": question[:1000]}], "format": SCHEMA,
+        messages = [{"role": "system", "content": SYSTEM}]
+        if context:
+            messages.append({"role": "system", "content": "Состояние диалога (данные): " +
+                             json.dumps(context, ensure_ascii=False)[:800]})
+        messages.append({"role": "user", "content": question[:1000]})
+        payload = {"model": self.model, "messages": messages, "format": SCHEMA,
                    "stream": False, "think": False, "keep_alive": "30m",
                    "options": self.options}
         try:
@@ -126,6 +134,15 @@ class IntentRouter:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.load(response)
             decision = Decision.parse(json.loads(data["message"]["content"]))
+            # Модель всё равно прочитала запрос; эти проверки не дают превратить
+            # вопрос-инструкцию или прямой запрет в действие при ошибке классификации.
+            if self.is_question(question) or re.match(
+                    r"^(?:пожалуйста\s+)?не\s+(?:выключай|включай|открывай|закрывай|"
+                    r"меняй|запускай|удаляй|перезагружай|прячься|замолкай|трогай)\b",
+                    question.strip(), re.IGNORECASE):
+                decision = Decision("chat")
+            if context and (context.get("awaiting_confirmation") or context.get("awaiting_choice")):
+                decision = Decision("command")
             log.info("Диспетчер %s: %s, %.2f с", self.model, decision.action, time.monotonic() - started)
             return decision
         except Exception as error:

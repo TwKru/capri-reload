@@ -65,10 +65,23 @@ class RouterTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 Decision("open", target).command()
 
-    def test_explicit_question_goes_to_chat_without_model_call(self):
-        with patch("intent_router.urllib.request.urlopen") as request:
-            self.assertEqual(IntentRouter({}).ask("Как выключить компьютер?").action, "chat")
-            request.assert_not_called()
+    def test_questions_and_prohibitions_are_classified_but_never_executed(self):
+        for phrase in ("Как выключить компьютер?", "не выключай музыку"):
+            body = {"message": {"content": json.dumps(decision("music"))}}
+            with patch("intent_router.urllib.request.urlopen",
+                       return_value=io.BytesIO(json.dumps(body).encode())) as request:
+                self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
+                request.assert_called_once()
+
+    def test_dialogue_context_is_sent_as_data(self):
+        body = {"message": {"content": json.dumps(decision("hide"))}}
+        with patch("intent_router.urllib.request.urlopen",
+                   return_value=io.BytesIO(json.dumps(body).encode())) as request:
+            result = IntentRouter({}).ask("нет", context={"awaiting_confirmation": True})
+        self.assertEqual(result.action, "command")
+        payload = json.loads(request.call_args.args[0].data)
+        self.assertIn('awaiting_confirmation', payload["messages"][1]["content"])
+        self.assertEqual(payload["messages"][-1]["content"], "нет")
 
     def test_explicit_volume_number_overrides_wrong_model_parameter(self):
         with patch("actions.AppIndex.build"):

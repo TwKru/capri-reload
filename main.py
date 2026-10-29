@@ -743,7 +743,7 @@ class Capri(QObject):
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
 
-    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask"):
+    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
         call_lock = lock if lock is not None else self.ai_call_lock
         while not call_lock.acquire(blocking=False):
@@ -777,6 +777,8 @@ class Capri(QObject):
             try:
                 if on_sentence and isinstance(working, LocalAI):
                     result[0] = working.ask(question, on_sentence=sentence)
+                elif context is not None and method == "ask":
+                    result[0] = working.ask(question, context=context)
                 else:
                     result[0] = getattr(working, method)(question)
             except Exception:
@@ -883,33 +885,46 @@ class Capri(QObject):
         if cancelled():
             return
 
+        # Каждый принятый запрос сначала читает мини-ИИ. В исполнители передаём
+        # исходную фразу: модель не может подделать подтверждение пользователя.
+        decision = None
+        selection = callable(self.actions.pending) or bool(self.actions.choice)
+        if self.router:
+            context = {"awaiting_confirmation": callable(self.actions.pending),
+                       "awaiting_choice": bool(self.actions.choice)}
+            if isinstance(self.actions.choice, list):
+                context["choices"] = [str(item[0])[:100] for item in self.actions.choice[:6]]
+            decision = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
+                                    lock=self.router_call_lock, context=context)
+            if decision is AI_CANCELLED or cancelled() or serial != self.command_serial:
+                return
         dismissal = bool(DISMISS_RE.search(cmd))
         if dismissal:
             hide = dismissal_hint(cmd)
-            if hide is None and self.router:
-                hide = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
-                                    lock=self.router_call_lock, method="classify_dismissal")
-                if hide is AI_CANCELLED or cancelled():
-                    return
+            if hide is None:
+                hide = decision is not None and decision.action == "hide"
             if hide is True:
                 self.stop_listening()
                 self.vanish.emit()
                 return
-        reply = None if dismissal else self.actions.handle(cmd)
-        self.sync_personality()
-        if cancelled():
-            return
-        if not dismissal and self.router and (reply is None or reply.action == "unresolved"):
-            decision = self._ask_ai(self.router, cmd, lambda: cancelled() or serial != self.command_serial,
-                                    lock=self.router_call_lock)
-            if decision is AI_CANCELLED:
-                return
-            if decision is not None and decision.action != "chat":
+        if dismissal:
+            reply = None
+        elif selection:
+            reply = self.actions.handle(cmd)
+        elif decision is None or decision.action == "command":
+            reply = self.actions.handle(cmd)
+        elif decision.action == "chat":
+            reply = self.actions.handle_conversation(cmd)
+        else:
+            # Сохраняем точные названия песен, программ и пользовательские команды.
+            reply = self.actions.handle(cmd)
+            if reply is None or reply.action == "unresolved":
                 routed = self.actions.execute_decision(decision, original=cmd)
                 if routed is not None:
                     reply = routed
-            elif decision is not None and reply is not None and IntentRouter.is_question(cmd):
-                reply = None
+        self.sync_personality()
+        if cancelled():
+            return
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
         if reply is None:

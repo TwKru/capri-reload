@@ -1238,6 +1238,17 @@ class Actions:
             return self.search(command, re.fullmatch(r"найди (?P<q>.+)", command))
         return None
 
+    def handle_conversation(self, cmd):
+        """Локальные ответы и характер без выполнения команд компьютера."""
+        custom = self.custom_reply(norm(cmd))
+        if custom:
+            return custom
+        if self.personality:
+            reaction = self.personality.react(cmd)
+            if reaction.reply:
+                return Reply(reaction.reply, "personality")
+        return None
+
     def handle(self, cmd):
         c = norm(cmd)
         cancel_ensure()  # новая команда — старая проверка «заиграло ли видео» больше не нужна

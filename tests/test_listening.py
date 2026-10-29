@@ -179,17 +179,17 @@ class ListeningTests(unittest.TestCase):
             self.capri.on_final(text, b"audio")
             self.capri._process(self.capri.jobs.get_nowait())
         self.capri.actions.handle.assert_not_called()
-        self.capri.router.ask.assert_not_called()
+        self.assertEqual(self.capri.router.ask.call_count, 3)
         self.capri.router.classify_dismissal.assert_not_called()
 
     def test_ambiguous_request_uses_context_classifier(self):
         self.capri.router = main.IntentRouter({})
         hidden = []
         self.capri.vanish.connect(lambda: hidden.append(True))
-        with patch.object(self.capri.router, "classify_dismissal", return_value=True) as classify:
+        with patch.object(self.capri.router, "ask", return_value=Decision("hide")) as classify:
             self.capri.on_final("капри ты мне мешаешь закройся уже", b"audio")
             self.capri._process(self.capri.jobs.get_nowait())
-        classify.assert_called_once_with("ты мне мешаешь закройся уже")
+        self.assertEqual(classify.call_args.args[0], "ты мне мешаешь закройся уже")
         self.assertEqual(hidden, [True])
 
     def test_name_interrupt_immediately_refreshes_avatar(self):
@@ -394,11 +394,40 @@ class ListeningTests(unittest.TestCase):
         self.capri.actions.execute_decision.assert_called_once_with(Decision("next"), original="давай другую песню")
         self.capri.local.ask.assert_not_called()
 
-    def test_known_command_does_not_call_router(self):
+    def test_known_command_calls_router_before_execution(self):
         self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("command")
+        order = []
+        self.capri.router.ask.side_effect = lambda *a, **kw: order.append("router") or Decision("command")
+        self.capri.actions.handle.side_effect = lambda cmd: order.append("execute") or Reply("Готово.")
         self.capri.on_final("капри открой ютуб", b"audio")
         self.capri._process(self.capri.jobs.get_nowait())
-        self.capri.router.ask.assert_not_called()
+        self.capri.router.ask.assert_called_once()
+        self.assertEqual(order, ["router", "execute"])
+
+    def test_chat_never_reaches_computer_commands(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("chat")
+        self.capri.actions.handle_conversation.return_value = None
+        self.capri.local = Mock()
+        self.capri.local.ask.return_value = "Объяснение."
+        self.capri.ai.available = False
+        self.capri.text_command("Как выключить компьютер?")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.router.ask.assert_called_once()
+        self.capri.actions.handle.assert_not_called()
+        self.capri.actions.execute_decision.assert_not_called()
+        self.capri.local.ask.assert_called_once_with("Как выключить компьютер?")
+
+    def test_confirmation_stays_raw_after_router(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("music")
+        self.capri.actions.pending = Mock()
+        self.capri.text_command("нет")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.handle.assert_called_once_with("нет")
+        self.capri.actions.execute_decision.assert_not_called()
+        self.assertTrue(self.capri.router.ask.call_args.kwargs["context"]["awaiting_confirmation"])
 
     def test_update_starts_helper_once_after_spoken_reply(self):
         self.capri.actions.handle.return_value = Reply("Обновляюсь.", "update")
