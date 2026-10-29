@@ -9,7 +9,7 @@ from intent_router import IntentRouter
 
 class DismissalTests(unittest.TestCase):
     def test_direct_requests(self):
-        for text in ("заткнись", "заткнисть", "закройся уже", "ну пожалуйста исчезни с экрана", "отвали нахуй"):
+        for text in ("заткнись", "заткнисть", "закройся уже", "ну пожалуйста исчезни с экрана", "отвали нахуй", "пропади", "отстань"):
             with self.subTest(text=text):
                 self.assertIs(dismissal_hint(text), True)
 

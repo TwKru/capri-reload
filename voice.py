@@ -11,6 +11,7 @@ import random
 import re
 import shutil
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -505,6 +506,53 @@ def _trim_cache():
         pass
 
 
+WINDOWS_TTS_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+    $voices = @($synth.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'ru-*' })
+    $female = @($voices | Where-Object { $_.VoiceInfo.Gender -eq 'Female' })
+    if ($female.Count -gt 0) { $synth.SelectVoice($female[0].VoiceInfo.Name) }
+    elseif ($voices.Count -gt 0) { $synth.SelectVoice($voices[0].VoiceInfo.Name) }
+    $synth.Volume = 100
+    $synth.SetOutputToWaveFile([string]$request.path)
+    $synth.Speak([string]$request.text)
+} finally { $synth.Dispose() }
+"""
+
+
+def render_windows_voice(text, path, stop_event, timeout=45):
+    """Keep Windows speech/COM outside the assistant process; send text as JSON data."""
+    if stop_event.is_set():
+        return True
+    executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                              "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    payload = json.dumps({"text": text, "path": os.path.abspath(path)}, ensure_ascii=True).encode("ascii")
+    process = subprocess.Popen([executable, "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TTS_SCRIPT],
+                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               creationflags=0x08000000)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if stop_event.is_set():
+                return True
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Windows speech synthesis timed out")
+            try:
+                _, error = process.communicate(input=payload, timeout=0.1)
+                if process.returncode:
+                    raise RuntimeError(f"Windows speech worker exited {process.returncode}: {error[-400:]!r}")
+                return False
+            except subprocess.TimeoutExpired:
+                payload = None  # communicate already buffered and sent the input
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+
 class Speaker:
     def __init__(self, cfg):
         self.voice = cfg.get("voice", "ru-RU-SvetlanaNeural")
@@ -770,25 +818,27 @@ class Speaker:
                 self.playing = False
 
     def _sapi(self, text):
-        import comtypes.client
-        sp = comtypes.client.CreateObject("SAPI.SpVoice")
-        voices = sp.GetVoices()
-        for i in range(voices.Count):
-            desc = voices.Item(i).GetDescription()
-            if "Russian" in desc or "Irina" in desc or "Pavel" in desc:
-                sp.Voice = voices.Item(i)
-                break
-        sp.Volume = max(0, min(100, self.volume))
-        self.playing = True
-        try:
-            sp.Speak(text, 1 | 16)  # SVSFlagsAsync | SVSFIsNotXML
-            while not sp.WaitUntilDone(50):
-                if self.stop_event.is_set():
-                    sp.Speak("", 2)
-                    return True
-            return False
-        finally:
-            self.playing = False
+        with tempfile.TemporaryDirectory(prefix="capri_windows_tts_") as folder:
+            raw = os.path.join(folder, "voice.wav")
+            if render_windows_voice(text, raw, self.stop_event):
+                return True
+            if self.stop_event.is_set():
+                return True
+            path = raw
+            try:
+                audio = pitch_shift(trim_silence(decode(raw)), self.shift)
+                if self.fx > 0:
+                    audio = fx_process(audio, self.fx)
+                path = os.path.join(folder, "processed.wav")
+                write_wav(path, audio)
+            except Exception:
+                log.exception("Не удалось обработать запасной голос Windows")
+                path = raw
+            self.playing = True
+            try:
+                return play_mp3(path, self.stop_event, self.volume)
+            finally:
+                self.playing = False
 
 
 def make_glitch_sound(path, volume=100):

@@ -25,6 +25,16 @@ logging.basicConfig(filename=os.path.join(BASE, "capri.log"), level=logging.INFO
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("capri")
 log.info("Python %s", sys.version.split()[0])
+# Native extension crashes bypass Python exception handlers.
+try:
+    import faulthandler
+    _crash_path = os.path.join(BASE, "capri-crash.log")
+    _crash_log = open(_crash_path, "a" if not os.path.exists(_crash_path) or os.path.getsize(_crash_path) < 1048576 else "w",
+                      encoding="utf-8")
+    faulthandler.enable(file=_crash_log, all_threads=True)
+except (OSError, RuntimeError):
+    log.exception("Не удалось включить диагностику нативных сбоев")
+
 
 
 def fatal(text):
