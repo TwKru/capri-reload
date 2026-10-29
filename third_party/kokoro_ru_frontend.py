@@ -211,5 +211,3 @@ def _respell_word(word: str) -> str:
 
 def respell(text: str) -> str:
     return _WORD_RE.sub(lambda m: _respell_word(m.group(0)), text)
-
-
