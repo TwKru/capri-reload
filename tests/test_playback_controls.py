@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import media
 from actions import Actions
+from action_replies import ACTION_REPLIES
 
 
 class PlaybackCommandTests(unittest.TestCase):
@@ -16,7 +17,7 @@ class PlaybackCommandTests(unittest.TestCase):
     def test_like_commands_use_music_page_and_report_only_verified_success(self):
         for command in ("поставь лайк песне", "лайкни трек", "лайк", "добавь песню в понравившиеся"):
             with self.subTest(command=command), patch("actions.media.music_page_control", return_value=True) as like:
-                self.assertEqual(self.app.handle(command).text, "Песне поставлен лайк.")
+                self.assertIn(self.app.handle(command).text, ACTION_REPLIES["like"])
                 like.assert_called_once_with("like", True)
         with patch("actions.media.music_page_control", return_value=False):
             self.assertIn("Не удалось", self.app.handle("лайкни песню").text)

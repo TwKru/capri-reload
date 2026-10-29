@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import main
 from actions import Actions, Reply
 from intent_router import Decision
+from request_planner import RequestPlan
 
 
 class ListeningTests(unittest.TestCase):
@@ -17,6 +18,9 @@ class ListeningTests(unittest.TestCase):
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), \
                 patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             self.capri = main.Capri(cfg)
+        sound = patch("main.play_sound_async")
+        sound.start()
+        self.addCleanup(sound.stop)
         self.capri.web = Mock()
         self.capri.web.ask.return_value = []
         self.capri.reload_config_if_changed = Mock()
@@ -29,6 +33,72 @@ class ListeningTests(unittest.TestCase):
         self.capri._check_voice_blocked = Mock()
         self.modes = []
         self.capri.mode.connect(lambda mode, seconds: self.modes.append(mode))
+
+    def test_full_web_pipeline_runs_in_order_and_gives_original_question_to_big_model(self):
+        order = []
+        self.capri.router = Mock()
+        self.capri.router.ask.side_effect = lambda *a, **kw: order.append("command") or Decision("chat")
+        self.capri.router.assess.side_effect = lambda *a, **kw: order.append("assess") or RequestPlan("web", "simple", "курс доллара сегодня")
+        sources = [{"title": "Курс", "url": "https://example.org/", "text": "Сегодня курс 80 рублей. Дополнительная информация."}]
+        compressed = [dict(sources[0], text="Сегодня курс 80 рублей.")]
+        self.capri.web.ask.side_effect = lambda *a, **kw: order.append("search") or sources
+        self.capri.router.compress.side_effect = lambda *a, **kw: order.append("compress") or compressed
+        self.capri.actions.handle_conversation.return_value = None
+        self.capri.local = Mock()
+        self.capri.local.ask.side_effect = lambda *a, **kw: order.append("answer") or "Сегодня курс восемьдесят рублей."
+        self.capri.say = Mock(return_value=False)
+        question = "Какой курс доллара сегодня?"
+        self.capri.text_command(question)
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(order, ["command", "assess", "search", "compress", "answer"])
+        self.capri.local.ask.assert_called_once_with(question, web_context=compressed)
+        self.assertEqual(self.capri.last_web_sources, sources)
+
+    def test_scripted_action_does_not_run_second_stage_or_big_model(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("command")
+        self.capri.local = Mock()
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("сделай тише")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.handle.assert_called_once_with("сделай тише")
+        self.capri.router.assess.assert_not_called()
+        self.capri.router.compress.assert_not_called()
+        self.capri.local.ask.assert_not_called()
+        self.capri.web.ask.assert_not_called()
+
+    def test_stop_during_second_check_never_starts_web_or_big_model(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("chat")
+        self.capri.actions.handle_conversation.return_value = None
+        def assess(*args, **kwargs):
+            self.capri.stop_listening()
+            return RequestPlan("web", "simple", "запрос")
+        self.capri.router.assess.side_effect = assess
+        self.capri.local = Mock()
+        self.capri.say = Mock(return_value=False)
+        self.capri.on_final("капри объясни что-нибудь", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.web.ask.assert_not_called()
+        self.capri.local.ask.assert_not_called()
+        self.capri.say.assert_not_called()
+
+    def test_stop_during_compression_does_not_send_result_to_big_model(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("chat")
+        self.capri.router.assess.return_value = RequestPlan("web", "simple", "погода в Краснообске")
+        self.capri.actions.handle_conversation.return_value = None
+        self.capri.web.ask.return_value = [{"title": "Погода", "url": "https://example.org/", "text": "Факт."}]
+        def compress(*args, **kwargs):
+            self.capri.stop_listening()
+            return []
+        self.capri.router.compress.side_effect = compress
+        self.capri.local = Mock()
+        self.capri.say = Mock(return_value=False)
+        self.capri.on_final("капри погода в Краснообске", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.local.ask.assert_not_called()
+        self.capri.say.assert_not_called()
 
     def test_name_in_game_appears_with_sound_before_command_processing(self):
         self.capri.game_active = True
@@ -67,17 +137,20 @@ class ListeningTests(unittest.TestCase):
         self.capri.actions.handle.return_value = Reply("погода в Краснообске", "research")
         self.capri.ai.available = False
         self.capri.local = Mock()
+        self.capri.local.ask.return_value = None
         self.capri.web.ask.return_value = [{"title": "Погода", "url": "https://open-meteo.com/", "text": "Температура 3.",
                                            "answer": "Краснообск: сейчас плюс 3 градуса."}]
         self.capri.say = Mock(return_value=False)
         self.capri.text_command("найди погоду в Краснообске")
         self.capri._process(self.capri.jobs.get_nowait())
-        self.capri.local.ask.assert_not_called()
+        self.capri.local.ask.assert_called_once()
         self.capri.say.assert_called_once_with("Краснообск: сейчас плюс 3 градуса.")
 
     def test_router_search_preserves_whole_question_and_runs_before_answer(self):
         self.capri.router = Mock()
-        self.capri.router.ask.return_value = Decision("search", "Франция")
+        self.capri.router.ask.return_value = Decision("chat")
+        self.capri.router.assess.return_value = RequestPlan("web", "simple", "Франция")
+        self.capri.actions.handle_conversation.return_value = None
         self.capri.actions.handle.return_value = None
         self.capri.actions.execute_decision.return_value = Reply("Франция", "research")
         self.capri.local = Mock()
@@ -130,7 +203,8 @@ class ListeningTests(unittest.TestCase):
         self.capri._process(self.capri.jobs.get_nowait())
         self.capri.web.ask.assert_not_called()
         self.capri.actions.web.assert_not_called()
-        self.capri.say.assert_called_once_with("Не знаю ответа.")
+        self.capri.say.assert_called_once()
+        self.assertIn("Не смогла", self.capri.say.call_args.args[0])
 
     def test_explicit_research_skips_uninformed_answer_and_remains_cancellable(self):
         self.capri.actions.handle.return_value = Reply("история Python", "research")

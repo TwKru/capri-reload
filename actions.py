@@ -1417,15 +1417,15 @@ class Actions:
 
     def updates(self, c, m):
         if re.search(r"\bобновись\b|обнови (себя|капри)|^(установи|скачай) обновления$", c):
-            return Reply("Проверю и скачаю обновление из capri-reload. Личные настройки сохраню, после установки перезапущусь.",
+            return Reply(line("updates_start"),
                          "update")
         if re.search(r"гитхаб|github|где скачать|страниц", c):
             self.web(CAPRI_URL)
-            return Reply("Открываю Capri Reload на твоём GitHub.")
+            return Reply(line("updates_open"))
         try:
             latest = updater.latest_version()
             if latest == updater.installed_version(self.base_dir):
-                return Reply("Установлена последняя версия Capri Reload.")
+                return Reply(line("updates_current"))
             return Reply(f"На GitHub доступна версия {latest[:7]}. Для установки скажи: Капри, обновись.")
         except Exception as error:
             log.info("Не удалось проверить обновления: %s", error)
@@ -1473,16 +1473,16 @@ class Actions:
         return Reply(self._character_line("roam", line("roam")), "roam")
 
     def spin(self, c, m):
-        return Reply(self._character_line("spin", "Смотри, полный оборот!"), "anim:spin")
+        return Reply(self._character_line("spin", line("spin")), "anim:spin")
 
     def nap(self, c, m):
-        return Reply("Ладно, немного подремлю. Позовёшь — проснусь.", "anim:sleep")
+        return Reply(line("nap"), "anim:sleep")
 
     def wake(self, c, m):
-        return Reply("Я уже здесь.", "anim:wake")
+        return Reply(line("wake"), "anim:wake")
 
     def dance(self, c, m):
-        return Reply("Лови мой танец!", "anim:dance")
+        return Reply(line("dance"), "anim:dance")
 
     # --- прокрутка ---
     def scroll(self, c, m):
@@ -1589,7 +1589,7 @@ class Actions:
         if self._resume_song():
             return Reply(line("media_play"))
         self.web("https://music.youtube.com/")
-        return Reply("Открываю YouTube Music.")
+        return Reply(line("music_open"))
 
     def media_next(self, c, m):
         ok = self._skip_song("next")
@@ -1604,7 +1604,7 @@ class Actions:
 
     def media_prev(self, c, m):
         ok = self._skip_song("prev")
-        return Reply(line("done") if ok else line("media_none"))
+        return Reply(line("media_prev") if ok else line("media_none"))
 
     @staticmethod
     def _skip_song(action):
@@ -1630,18 +1630,17 @@ class Actions:
         mode = "off" if off else "list" if all_songs else "track"
         if not self._set_playback_mode("repeat", mode):
             return Reply("Не удалось изменить повтор. Открой вкладку YouTube Music или плеер с поддержкой повтора.")
-        return Reply({"off": "Повтор выключен.", "track": "Поставила песню на повтор.",
-                      "list": "Включила повтор плейлиста."}[mode])
+        return Reply(line({"off": "repeat_off", "track": "repeat_track", "list": "repeat_list"}[mode]))
 
     def media_shuffle(self, c, m):
         enabled = not re.match(r"^(выключи|отключи|убери)\b", c)
         if not self._set_playback_mode("shuffle", enabled):
             return Reply("Не удалось изменить перемешивание. Открой вкладку YouTube Music или плеер с поддержкой перемешивания.")
-        return Reply("Песни перемешаны." if enabled else "Перемешивание выключено.")
+        return Reply(line("shuffle_on" if enabled else "shuffle_off"))
 
     def media_like(self, c, m):
         if media.music_page_control("like", True):
-            return Reply("Песне поставлен лайк.")
+            return Reply(line("like"))
         return Reply("Не удалось подтвердить лайк. Открой вкладку YouTube Music с текущей песней и проверь вход в аккаунт.")
 
     def media_info(self, c, m):
@@ -2064,7 +2063,7 @@ class Actions:
         except OSError as error:
             log.exception("Не удалось установить гамму")
             return Reply(f"Не смогла изменить гамму: {error}.")
-        return Reply("Гамма " + f"{value:g}".replace(".", ",") + ".")
+        return Reply(line("gamma_set", n=f"{value:g}".replace(".", ",")))
 
     def night(self, c, m):
         try:
@@ -2072,7 +2071,7 @@ class Actions:
         except (OSError, ValueError) as error:
             log.exception("Не удалось включить ночную гамму")
             return Reply(f"Не смогла изменить гамму: {error}.")
-        return Reply("Ночь. Гамма на максимуме, тёмные участки высветлены.")
+        return Reply(line("night"))
 
     def day(self, c, m):
         try:
@@ -2080,7 +2079,7 @@ class Actions:
         except (OSError, ValueError) as error:
             log.exception("Не удалось вернуть гамму")
             return Reply(f"Не смогла вернуть гамму: {error}.")
-        return Reply("Вернула исходную гамму." if restored else "Сохранённой гаммы нет. Сначала включи режим «ночь».")
+        return Reply(line("day") if restored else "Сохранённой гаммы нет. Сначала включи режим «ночь».")
 
     def brightness(self, c, m):
         try:

@@ -69,7 +69,7 @@ class PersonalityTests(unittest.TestCase):
                 reaction = self.person.react(phrase)
                 self.assertTrue(self.person.strongly_hurt)
                 self.assertIn(reaction.reply, ANGRY_REPLIES)
-                self.assertEqual(self.person.command_line("roam", "default"), ANGRY_COMMAND_LINES["roam"])
+                self.assertIn(ANGRY_COMMAND_LINES["roam"], self.person.command_line("roam", "default"))
                 self.person.react("извини")
                 self.assertFalse(self.person.strongly_hurt)
                 self.assertNotIn(ANGRY_CONTEXT, self.person.context())

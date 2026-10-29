@@ -59,6 +59,7 @@ try:
     from local_ai import LocalAI
     from intent_router import IntentRouter
     from web_search import WebSearch
+    from request_planner import RequestPlan, compact_sources, fallback_plan
     from persona import LINES, gendered, line, set_user
     from avatar import Avatar
     import zapret
@@ -78,7 +79,7 @@ DEFAULTS = {
     "local_timeout_seconds": 15,
     "intent_router": True,
     "router_model": "qwen3:0.6b",
-    "router_timeout_seconds": 2.5,
+    "router_timeout_seconds": 4.0,
     "router_num_gpu": 0,
     "web_app_lookup": True,
     "auto_game_mode": True,
@@ -377,10 +378,12 @@ class Capri(QObject):
         """Через полминуты после запуска озвучиваем в фоне постоянные фразы и свои ответы — потом они
         звучат сразу, без повторного синтеза."""
         time.sleep(30)
-        static = [gendered(t) for variants in LINES.values() for t in variants if "{" not in t]
-        static = self.personality.prewarm_phrases() + static
+        static = [gendered(t) for variants in LINES.values() for t in variants[:1] if "{" not in t]
+        priority = [gendered(text) for key in ("media_paused", "media_play", "done", "mute", "unmute", "like")
+                    for text in LINES[key][:2]]
+        static = priority + self.personality.prewarm_phrases() + static
         static += list(self.cfg.get("replies", {}).values())
-        self.speaker.prewarm(static)
+        self.speaker.prewarm(list(dict.fromkeys(static))[:48])
 
     def sync_personality(self):
         self.personality.enabled = bool(self.cfg.get("personality", True))
@@ -750,7 +753,7 @@ class Capri(QObject):
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
 
-    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None, evidence=None):
+    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None, evidence=None, answer_tokens=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
         call_lock = lock if lock is not None else self.ai_call_lock
         while not call_lock.acquire(blocking=False):
@@ -762,6 +765,8 @@ class Capri(QObject):
             return AI_CANCELLED
         # Отменённый запрос не должен позже дописать ответ в историю разговора.
         working = ai if isinstance(ai, IntentRouter) else copy.copy(ai)
+        if isinstance(working, LocalAI) and answer_tokens is not None:
+            working.max_answer_tokens = answer_tokens
         history = getattr(ai, "history", None)
         if isinstance(history, list):
             working.history = copy.deepcopy(history)
@@ -789,8 +794,8 @@ class Capri(QObject):
                     result[0] = working.ask(question, **kwargs)
                 elif evidence is not None:
                     result[0] = working.ask(question, web_context=evidence)
-                elif context is not None and method == "ask":
-                    result[0] = working.ask(question, context=context)
+                elif context is not None:
+                    result[0] = getattr(working, method)(question, context=context)
                 else:
                     result[0] = getattr(working, method)(question)
             except Exception:
@@ -940,13 +945,26 @@ class Capri(QObject):
             return
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
-        research_query = reply.text if reply is not None and reply.action == "research" else None
-        if research_query is not None and decision is not None and decision.action == "search":
-            research_query = cmd  # мини-модель может потерять вопрос, оставив лишь город/имя
-        if research_query is not None:
+        explicit_query = reply.text if reply is not None and reply.action == "research" else None
+        if explicit_query is not None:
             reply = None
         if reply is None:
             ai_cancelled = lambda: cancelled() or serial != self.command_serial
+            plan = None
+            if self.router and not dismissal:
+                recent = getattr(self.local, "history", []) if self.local else []
+                context = {"explicit_search": explicit_query is not None,
+                           "dialogue": [{"role": item["role"], "content": item["content"][:250]}
+                                        for item in recent[-2:]] if isinstance(recent, list) else []}
+                plan = self._ask_ai(self.router, cmd, ai_cancelled, lock=self.router_call_lock,
+                                    method="assess", context=context)
+                if plan is AI_CANCELLED or ai_cancelled():
+                    return
+            if not isinstance(plan, RequestPlan):
+                plan = fallback_plan(cmd, explicit_query) if not dismissal else RequestPlan()
+            if plan.route == "web" and explicit_query is None and not self.cfg.get("search_when_unsure", True):
+                plan = RequestPlan("local", plan.complexity)
+            log.info("План ответа: %s, %s", plan.route, plan.complexity)
 
             def speak_sentence(text):
                 nonlocal streamed
@@ -955,39 +973,41 @@ class Capri(QObject):
                 streamed = True
                 return self.say(text)
 
-            answer = None
-            external = self.cfg.get("enable_ai") and self.ai.available
-            if external:
-                answer = self._ask_ai(self.ai, research_query or cmd, ai_cancelled)
-            elif not research_query and self.local:
-                answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence)
-            if answer is AI_CANCELLED or ai_cancelled():
-                return
-            # Интернет — отдельный маршрут диспетчера/явной команды, не запасной
-            # ответ на тайм-аут разговорной модели и не на её отказ ответить.
-            if not answer and not dismissal and research_query is not None:
+            answer, evidence, ready_answer = None, None, None
+            if plan.route == "web" and not dismissal:
+                query = plan.search_query(cmd)
                 self.last_web_sources = []
-                sources = self._ask_ai(self.web, research_query or cmd, ai_cancelled, lock=self.web_call_lock)
+                sources = self._ask_ai(self.web, query, ai_cancelled, lock=self.web_call_lock)
                 if sources is AI_CANCELLED or ai_cancelled():
                     return
-                if sources:
-                    self.last_web_sources = sources
-                    if sources[0].get("answer"):
-                        answer = sources[0]["answer"]  # проверенные числовые данные погоды, без генерации
-                    elif self.local:
-                        answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence, evidence=sources)
-                        if answer is AI_CANCELLED or ai_cancelled():
-                            return
-                    if not answer:
-                        answer = "Нашла сведения, но не смогла сейчас составить ответ. Попробуй ещё раз."
-                else:
+                if not sources:
                     answer = "Не удалось получить сведения из интернета. Попробуй позже или уточни вопрос."
-            if not answer and not dismissal and (decision is not None and decision.action == "chat"
-                                                  or IntentRouter.is_basic_chat(cmd) or IntentRouter.is_question(cmd)):
-                answer = "Не смогла сейчас ответить. Попробуй ещё раз."
-            reply = (Reply(answer, "answer") if answer else
-                     Reply("Если хочешь, чтобы я исчезла с экрана, скажи: Капри, спрячься.", "answer")
-                     if dismissal else self.actions.fallback(cmd, force_search=bool(self.local)))
+                else:
+                    self.last_web_sources = sources
+                    ready_answer = sources[0].get("answer")
+                    # Уточнение города — ещё не сведения для ответа, модель тут не нужна.
+                    if sources[0].get("needs_location"):
+                        answer = ready_answer
+                    else:
+                        if self.router:
+                            evidence = self._ask_ai(self.router, {"question": cmd, "sources": sources}, ai_cancelled,
+                                                    lock=self.router_call_lock, method="compress")
+                            if evidence is AI_CANCELLED or ai_cancelled():
+                                return
+                        if not isinstance(evidence, list) or not evidence:
+                            evidence = compact_sources(cmd, sources)
+            if answer is None:
+                if self.cfg.get("enable_ai") and self.ai.available:
+                    answer = self._ask_ai(self.ai, cmd, ai_cancelled, evidence=evidence)
+                elif self.local:
+                    answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence, evidence=evidence,
+                                          answer_tokens=160 if plan.complexity == "simple" else 384)
+                if answer is AI_CANCELLED or ai_cancelled():
+                    return
+            if not answer:
+                answer = ready_answer or ("Нашла сведения, но не смогла сейчас составить ответ. Попробуй ещё раз."
+                                          if plan.route == "web" else "Не смогла сейчас ответить. Попробуй ещё раз.")
+            reply = Reply(answer, "answer")
         if cancelled():
             return
         if streamed:

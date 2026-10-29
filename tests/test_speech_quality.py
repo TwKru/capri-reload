@@ -80,7 +80,8 @@ class CasualStyleTests(unittest.TestCase):
         with patch.object(persona, "_CASUAL_TURN", 0), patch("persona.random.choice", side_effect=lambda values: values[0]):
             replies = [persona.line("open", t=target) for _ in range(24)]
         self.assertTrue(all(target in reply for reply in replies))
-        self.assertEqual(sum("блядь" in reply for reply in replies), 2)
+        self.assertEqual(sum("блядь" in reply for reply in replies), 0)
+        self.assertEqual(len(persona.LINES["open"]), 10)
         self.assertNotIn("listen", persona.CASUAL_VARIANTS)
         self.assertNotIn("greet", persona.CASUAL_VARIANTS)
 

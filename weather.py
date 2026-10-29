@@ -70,7 +70,7 @@ def weather_sources(query):
         return None
     candidates = location_candidates(query)
     if not candidates:
-        return [{"title": "Уточнение города", "url": "https://open-meteo.com/", "text": "Город не указан.",
+        return [{"title": "Уточнение города", "url": "https://open-meteo.com/", "text": "Город не указан.", "needs_location": True,
                  "answer": "Назови город в запросе, например: погода в Краснообске."}]
     try:
         place = None
@@ -83,7 +83,7 @@ def weather_sources(query):
                 place = exact[0]
                 break
         if place is None:
-            return [{"title": "Уточнение города", "url": "https://open-meteo.com/", "text": "Город не определён однозначно.",
+            return [{"title": "Уточнение города", "url": "https://open-meteo.com/", "text": "Город не определён однозначно.", "needs_location": True,
                      "answer": "Не смогла однозначно определить город. Уточни город и область в запросе о погоде."}]
         lat = place["latitude"]
         lon = place["longitude"]

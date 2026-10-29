@@ -2,6 +2,8 @@
 import random
 import re
 
+from action_replies import ACTION_REPLIES
+
 CHARACTER = """Ты разговариваешь с пользователем как живая собеседница, которая живёт в его компьютере.
 Твоя предыстория (только для тебя, не пересказывай её): тебя зовут Капри, ты цифровая личность
 из Найт-Сити, собранная из сознаний многих людей, и втайне мечтаешь о небе.
@@ -189,6 +191,8 @@ LINES = {
 
 # Разговорные варианты добавляются к обычным, а не заменяют слова в готовом ответе.
 # Поля с названиями, числами и результатами действий остаются нетронутыми.
+LINES.update({key: list(variants) for key, variants in ACTION_REPLIES.items()})
+
 CASUAL_VARIANTS = {
     "done": ("Готово. Заебись.",),
     "open": ("Открываю {t}. Погнали, блядь.",),
@@ -204,7 +208,8 @@ CASUAL_VARIANTS = {
     "move": ("Перебираюсь, блядь.",),
 }
 for _key, _variants in CASUAL_VARIANTS.items():
-    LINES[_key].extend(_variants)
+    if _key not in ACTION_REPLIES:
+        LINES[_key].extend(_variants)
 _CASUAL_TURN = 0
 
 
@@ -226,7 +231,7 @@ def gendered(text):
 def line(key, **kw):
     global _CASUAL_TURN
     variants = LINES[key]
-    if key in CASUAL_VARIANTS:
+    if key in CASUAL_VARIANTS and key not in ACTION_REPLIES:
         _CASUAL_TURN += 1
         variants = (CASUAL_VARIANTS[key] if _CASUAL_TURN % 12 == 0 else
                     [v for v in variants if v not in CASUAL_VARIANTS[key]])

@@ -80,10 +80,10 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
                 request.assert_called_once()
 
-    def test_fresh_question_can_be_routed_to_web_by_mini_model(self):
+    def test_first_stage_sends_fresh_question_to_second_check(self):
         body = {"message": {"content": json.dumps(decision("search", "Кто сейчас президент Франции"))}}
         with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())):
-            self.assertEqual(IntentRouter({}).ask("Кто сейчас президент Франции?").action, "search")
+            self.assertEqual(IntentRouter({}).ask("Кто сейчас президент Франции?").action, "chat")
 
     def test_dialogue_context_is_sent_as_data(self):
         body = {"message": {"content": json.dumps(decision("hide"))}}

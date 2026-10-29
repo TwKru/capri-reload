@@ -1,5 +1,7 @@
 """Локальное настроение персонажа: без моделей, таймеров и истории разговоров на диске."""
 from dataclasses import dataclass
+
+from action_replies import variants_for
 import json
 import math
 import os
@@ -186,9 +188,10 @@ class Personality:
 
     def command_line(self, key, default):
         if self.strongly_hurt:
-            return ANGRY_COMMAND_LINES.get(key, default)
-        text = COMMAND_LINES.get(self.mood, {}).get(key, default) if self.enabled else default
-        return text
+            angry = ANGRY_COMMAND_LINES.get(key)
+            return random.choice(variants_for(angry)) if angry else default
+        text = COMMAND_LINES.get(self.mood, {}).get(key) if self.enabled else None
+        return random.choice(variants_for(text)) if text else default
 
     def prewarm_phrases(self):
         if not self.enabled:

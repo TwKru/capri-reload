@@ -138,7 +138,7 @@ class GammaCommandTests(unittest.TestCase):
                 reply = app.handle(command)
                 set_gamma.assert_called_once_with(expected)
                 self.assertTrue(app.is_fast_command(command))
-                self.assertTrue(reply.text.startswith("Гамма "))
+                self.assertIn("Гамма ", reply.text)
         for command in ("гамма ноль", "гамма минус один", "гамма 100", "гамма сколько-нибудь"):
             with self.subTest(command=command), patch("actions.gamma.set_gamma") as set_gamma:
                 app.handle(command)
