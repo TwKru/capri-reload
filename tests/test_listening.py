@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import main
-from actions import Reply
+from actions import Actions, Reply
 from intent_router import Decision
 
 
@@ -22,9 +22,123 @@ class ListeningTests(unittest.TestCase):
         self.capri.actions.is_fast_command.return_value = False
         self.capri.actions.normalize_voice_command.side_effect = lambda cmd: cmd
         self.capri.actions.stop_background.return_value = False
+        self.capri.actions.pending = None
+        self.capri.actions.choice = None
         self.capri._check_voice_blocked = Mock()
         self.modes = []
         self.capri.mode.connect(lambda mode, seconds: self.modes.append(mode))
+
+    def test_question_accepts_one_reply_without_name(self):
+        self.capri.actions.handle.return_value = Reply("Какую музыку ты любишь?")
+        self.capri.on_final("капри поговорим", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(self.modes[-1], "listening")
+        self.assertGreater(self.capri.answer_until, time.time())
+        self.capri.on_final("люблю рок", b"audio")
+        job = self.capri.jobs.get_nowait()
+        self.assertEqual(job[1], "люблю рок")
+        self.assertEqual(self.capri.answer_until, 0)
+        self.capri.on_final("посторонняя речь", b"audio")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_confirmation_opens_window_even_without_question_mark(self):
+        pending = Mock()
+        self.capri.actions.pending = pending
+        self.capri.finish_reply("Подтверди действие словами да или нет.")
+        self.capri.on_final("да", b"audio")
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "да")
+        self.assertIs(self.capri.actions.pending, pending)
+        pending.assert_not_called()
+
+    def test_choice_opens_window_and_accepts_number(self):
+        self.capri.actions.choice = [("one", "one.exe"), ("two", "two.exe")]
+        self.capri.finish_reply("Есть два приложения. Назови номер.")
+        self.capri.on_final("второе", b"audio")
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "второе")
+        self.assertIsNotNone(self.capri.actions.choice)
+
+    def test_reply_window_starts_after_full_stream_only(self):
+        capri = self.capri
+        windows = []
+        class StreamAI(main.LocalAI):
+            def __init__(self):
+                self.history = []
+            def ask(self, question, on_sentence=None):
+                on_sentence("Хочешь поговорить?")
+                on_sentence("Что тебя интересует?")
+                return "Хочешь поговорить? Что тебя интересует?"
+        capri.local = StreamAI()
+        capri.ai.available = False
+        capri.actions.handle.return_value = None
+        capri.speaker.say.side_effect = lambda text: windows.append(capri.answer_until)
+        capri.on_final("капри привет", b"audio")
+        capri._process(capri.jobs.get_nowait())
+        self.assertEqual(windows, [0, 0])
+        self.assertGreater(capri.answer_until, time.time())
+        self.assertEqual(self.modes[-1], "listening")
+
+    def test_timeout_clears_pending_confirmation_and_choice(self):
+        self.capri.actions.pending = Mock()
+        self.capri.actions.choice = [("one", "one.exe")]
+        self.capri.finish_reply("Подтверждаешь?")
+        self.capri.expire_answer(self.capri.answer_until + 1)
+        self.assertIsNone(self.capri.actions.pending)
+        self.assertIsNone(self.capri.actions.choice)
+        self.assertEqual(self.capri.awake_until, 0)
+        self.capri.on_final("да", b"audio")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_short_answer_is_not_rejected_as_question_echo(self):
+        self.capri.speech_words = {"да", "или", "нет"}
+        self.capri.speech_end = time.time()
+        self.capri.finish_reply("Да или нет?")
+        self.capri.on_final("да", b"audio")
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "да")
+
+    def test_long_answer_keeps_pending_choice_alive(self):
+        self.capri.actions.choice = [("one", "one.exe")]
+        self.capri.finish_reply("Какое?")
+        self.capri.answer_until = self.capri.awake_until = time.time() + 0.1
+        self.capri.on_partial("хочу выбрать первое приложение")
+        self.assertGreater(self.capri.answer_until, time.time() + 7)
+        self.capri.expire_answer()
+        self.assertIsNotNone(self.capri.actions.choice)
+
+    def test_stop_cancels_reply_window(self):
+        self.capri.finish_reply("Как дела?")
+        self.capri.on_partial("стоп")
+        self.assertEqual(self.capri.answer_until, 0)
+        self.capri.on_final("хорошо", b"audio")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_question_in_standalone_phrase_also_opens_window(self):
+        self.capri._process(("say", "Как настроение?"))
+        self.assertGreater(self.capri.answer_until, time.time())
+        self.assertEqual(self.modes[-1], "listening")
+
+    def test_question_can_be_followed_by_a_statement(self):
+        self.capri.finish_reply("Хочешь поговорить? Я рядом.")
+        self.assertGreater(self.capri.answer_until, time.time())
+
+    def test_explicit_ask_opens_window_without_punctuation(self):
+        self.capri.finish_reply("Назови нужный вариант.", ask=True)
+        self.assertGreater(self.capri.answer_until, time.time())
+
+    def test_confirmation_answer_skips_google_retry(self):
+        self.capri.cfg["use_google_stt"] = True
+        self.capri.actions.pending = Mock()
+        self.capri.finish_reply("Подтверждаешь?")
+        self.capri.on_final("да", b"audio")
+        with patch.object(main, "google_stt") as google:
+            self.capri._process(self.capri.jobs.get_nowait())
+        google.assert_not_called()
+
+    def test_short_answer_can_repeat_the_last_question_word(self):
+        self.capri.speech_words = {"первое"}
+        self.capri.speech_end = time.time()
+        self.capri.finish_reply("Первое?")
+        self.capri.on_final("первое", b"audio")
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "первое")
 
     def test_dismissal_waits_for_full_sentence_and_hides_without_speech(self):
         self.capri.on_partial("капри заткнись")
@@ -341,6 +455,26 @@ class ListeningTests(unittest.TestCase):
         self.capri.speech_end = time.time()
         self.capri.on_partial("капри")
         self.assertEqual(self.capri.awake_until, 0)
+
+
+class ConfirmationTests(unittest.TestCase):
+    def test_negative_reply_never_executes_pending_action(self):
+        actions = Actions.__new__(Actions)
+        for text in ("нет", "да не надо", "да я не хочу", "конечно нет"):
+            pending = Mock(return_value=Reply("done"))
+            actions.pending = pending
+            actions.handle(text)
+            pending.assert_not_called()
+            self.assertIsNone(actions.pending)
+
+    def test_explicit_affirmative_executes_once(self):
+        actions = Actions.__new__(Actions)
+        for text in ("да", "ага", "подтверждаю", "да выключай", "да давай"):
+            pending = Mock(return_value=Reply("done"))
+            actions.pending = pending
+            self.assertEqual(actions.handle(text).text, "done")
+            pending.assert_called_once()
+            self.assertIsNone(actions.pending)
 
 
 if __name__ == "__main__":

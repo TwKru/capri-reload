@@ -1237,10 +1237,11 @@ class Actions:
         cancel_ensure()  # новая команда — старая проверка «заиграло ли видео» больше не нужна
         if self.pending:
             action, self.pending = self.pending, None
-            if re.match(r"^(да|давай|подтверждаю|конечно|ага)\b", c):
-                return action()
-            if re.match(r"^(нет|не надо|отмена|стоп)\b", c):
+            if re.search(r"\b(?:нет|не|неа|отмена|отмени|стоп)\b", c):
                 return Reply(line("cancel"))
+            if re.fullmatch(r"(?:да|давай|подтверждаю|конечно|ага)(?:\s+(?:да|давай|пожалуйста|подтверждаю|"
+                            r"выключай|перезагружай|делай|сделай|выполняй|компьютер|пк))*", c):
+                return action()
         if self.stop_background():  # любая новая команда останавливает автопрокрутку
             if re.match(r"^(стоп|хватит|стой|остановись|достаточно|перестань|харэ|все|всё)\b", c):
                 return Reply(line("scroll_stop"))

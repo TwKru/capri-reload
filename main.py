@@ -288,6 +288,7 @@ class Capri(QObject):
         self.speaker = Speaker(cfg)
         self.jobs = queue.Queue()
         self.awake_until = 0.0
+        self.answer_until = 0.0
         self.voice_generation = 0  # «стоп» отменяет голосовые задания, которые ещё обрабатываются
         self.command_serial = 0
         self.ai_call_lock = threading.Lock()
@@ -449,7 +450,10 @@ class Capri(QObject):
         """Микрофон слышит голос самой Капри: все слова фразы есть в том, что она говорит."""
         if self.speaking and getattr(self.speaker, "playing", True) is False:
             return False  # пока синтез только ждёт сеть, голос пользователя не может быть эхом
-        words = text.lower().replace("ё", "е").split()
+        words = re.findall(r"\w+", text.lower().replace("ё", "е"))
+        if not self.speaking and time.time() < self.answer_until and len(words) <= 2:
+            # A short reply such as "да" is not an echo just because it occurs in the question.
+            return False
         return bool(words) and all(w in self.speech_words for w in words)
 
     def wants_interrupt(self, text):
@@ -474,6 +478,7 @@ class Capri(QObject):
         """Вернуться к ожиданию имени и отменить ещё не выполненные голосовые задания."""
         self.voice_generation += 1
         self.awake_until = 0.0
+        self.answer_until = 0.0
         self.interrupted = True
         self.speaker.stop()
         self.actions.stop_background()
@@ -486,8 +491,34 @@ class Capri(QObject):
         self.mode.emit("idle", 0.0)
         log.info("Прослушивание остановлено, жду обращения по имени")
 
+    def expire_answer(self, now=None):
+        now = time.time() if now is None else now
+        if self.answer_until and now > self.answer_until:
+            if self.awake_until <= self.answer_until:
+                self.awake_until = 0.0
+            self.answer_until = 0.0
+            self.actions.pending = None
+            self.actions.choice = None
+            if not self.speaking:
+                self.mode.emit("idle", 0.0)
+
+    def finish_reply(self, text, ask=False):
+        """Open a single reply window only after the entire utterance has finished."""
+        pending = callable(self.actions.pending)
+        choice = isinstance(self.actions.choice, (list, tuple)) and bool(self.actions.choice)
+        question = bool(re.search(r"\?(?=\s|$|[»”\"'…!])", str(text)))
+        if ask or pending or choice or question:
+            seconds = float(self.cfg["listen_window_seconds"])
+            self.answer_until = self.awake_until = time.time() + seconds
+            self.mode.emit("listening", seconds)
+            log.info("Жду ответ без имени, %.0f с", seconds)
+        else:
+            self.answer_until = self.awake_until = 0.0
+            self.mode.emit("idle", 0.0)
+
     def on_partial(self, text):
         now = time.time()
+        self.expire_answer(now)
         echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
         if echo:
             return
@@ -505,16 +536,21 @@ class Capri(QObject):
         if self.has_wake(text) and (now > self.awake_until or now - self.last_partial_wake > 3):
             self.last_partial_wake = now
             self.awake_until = now + self.cfg["listen_window_seconds"]
+            if self.answer_until:
+                self.answer_until = self.awake_until
             log.info("Распознано обращение по имени, слушаю команду")
             self.appear(self.cfg["listen_window_seconds"])
             return
         if now <= self.awake_until:
             # Имя уже прозвучало: окно ограничивает ожидание начала команды, а не её длину.
             self.awake_until = now + self.cfg["listen_window_seconds"]
+            if self.answer_until:
+                self.answer_until = self.awake_until
             return
 
     def on_final(self, text, audio):
         now = time.time()
+        self.expire_answer(now)
         echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
         if self.is_stop_command(text) and not echo:
             self.stop_listening()
@@ -533,11 +569,14 @@ class Capri(QObject):
         if len(cmd) < 2:
             self.command_serial += 1
             self.awake_until = now + self.cfg["listen_window_seconds"]
+            if self.answer_until:
+                self.answer_until = self.awake_until
             self.subtitle.emit("")
             if now - self.last_partial_wake > 3:
                 self.appear(self.cfg["listen_window_seconds"])
             return
         self.awake_until = 0
+        self.answer_until = 0.0
         self.command_serial += 1
         self.jobs.put(("voice", cmd, audio, woke, self.voice_generation))
 
@@ -666,6 +705,8 @@ class Capri(QObject):
         self.subtitle.emit(line("listen"))
 
     def text_command(self, text):
+        self.expire_answer()
+        self.answer_until = self.awake_until = 0.0
         self.command_serial += 1
         self.summon.emit()
         self.jobs.put(("text", text))
@@ -768,7 +809,7 @@ class Capri(QObject):
             else:
                 self.summon.emit()
             if not self.say(text):
-                self.mode.emit("idle", 0.0)
+                self.finish_reply(text)
             return
         self.last_activity = time.time()
         if kind == "say":
@@ -779,7 +820,7 @@ class Capri(QObject):
                 self.mode.emit("idle", 0.0)
                 return
             if not self.say(job[1]):
-                self.mode.emit("idle", 0.0)
+                self.finish_reply(job[1])
             return
         if kind == "voice":
             _, cmd, audio, woke, _ = job
@@ -787,7 +828,9 @@ class Capri(QObject):
             self.summon.emit()
             self.mode.emit("thinking", 0.0)
             self.subtitle.emit("> " + cmd)
-            if self.cfg.get("use_google_stt") and not DISMISS_RE.search(cmd) and not self.actions.is_fast_command(cmd):
+            selection = callable(self.actions.pending) or bool(self.actions.choice)
+            if (self.cfg.get("use_google_stt") and not selection and not DISMISS_RE.search(cmd)
+                    and not self.actions.is_fast_command(cmd)):
                 better = google_stt(audio)
                 if better:
                     better = better.lower()
@@ -897,8 +940,7 @@ class Capri(QObject):
         elif reply.action == "hide":
             self.vanish.emit()
         else:
-            # Одна команда на обращение. Для следующей фразы нужно снова позвать Капри.
-            self.mode.emit("idle", 0.0)
+            self.finish_reply(reply.text, ask=reply.action == "ask")
 
     def say(self, text):
         """Озвучивает текст. Возвращает True, если Капри перебили."""
@@ -974,6 +1016,7 @@ def main():
     capri = Capri(cfg)
     capri.mood_changed.connect(avatar.set_mood)
     def refresh_game_mode():
+        capri.expire_answer()
         capri.sync_personality()
         active = bool(capri.cfg.get("auto_game_mode", True) and fullscreen_app_active())
         avatar.set_game_mode(active)
