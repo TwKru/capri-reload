@@ -558,10 +558,16 @@ class Speaker:
         self.voice = cfg.get("voice", "ru-RU-SvetlanaNeural")
         self.rate = cfg.get("voice_rate", "+5%")
         self.pitch = cfg.get("voice_pitch", "+8Hz")
-        self.fx = float(cfg.get("voice_fx", 1.0))  # 0 — чистый голос, 1 — цифровой голос Капри
-        self.lively = bool(cfg.get("voice_lively", True))  # у каждой фразы своя высота
-        self.shift = float(cfg.get("voice_shift", 2.0))      # общий подъём тона в полутонах
-        self.engine = cfg.get("tts_engine", "edge")          # edge — Microsoft онлайн, silero — офлайн
+        local_profile = cfg.get("tts_engine") == "kokoro"
+        self.fx = float(cfg.get("voice_fx", 0.0 if local_profile else 1.0))  # 0 — чистый голос, 1 — цифровой голос Капри
+        self.lively = bool(cfg.get("voice_lively", not local_profile))  # у каждой фразы своя высота
+        self.shift = float(cfg.get("voice_shift", 0.0 if local_profile else 2.0))      # общий подъём тона в полутонах
+        self.kokoro_speed = max(.5, min(2.0, float(cfg.get("kokoro_speed", 1.0))))
+        self.kokoro = None
+        if cfg.get("tts_engine") == "kokoro":
+            from kokoro_voice import KokoroClient
+            self.kokoro = KokoroClient(threads=cfg.get("kokoro_threads", 2))
+        self.engine = cfg.get("tts_engine", "edge")          # kokoro/silero — локально, edge — онлайн
         self.silero_voice = cfg.get("silero_voice", "xenia")
         self.silero_pitch = cfg.get("silero_pitch", "high")
         self.stop_event = threading.Event()
@@ -609,6 +615,8 @@ class Speaker:
                 if not cached:
                     self._render_ok(text)
                 return interrupted
+            except InterruptedError:
+                return True
             except VoicePlaybackError:
                 log.exception("Ошибка воспроизведения, пробую голос Windows")
                 if cached:
@@ -663,9 +671,24 @@ class Speaker:
                     self.cached_render(text, os.path.join(folder, "voice.wav"))
             self._render_ok(text)
             return os.path.isfile(self._cache_path(text))
+        except InterruptedError:
+            return False
         except Exception as error:
             self._edge_failed(error, started)
             return False
+
+    def render_kokoro(self, text, dst):
+        if self.kokoro is None:
+            from kokoro_voice import KokoroClient
+            self.kokoro = KokoroClient()
+        speed = max(.5, min(2.0, self.kokoro_speed / (2 ** (self.shift / 12))))
+        self.kokoro.render(text, dst, cancel=self.stop_event, speed=speed)
+        if self.shift or self.fx > 0:
+            audio = pitch_shift(trim_silence(decode(dst)), self.shift)
+            if self.fx > 0:
+                audio = fx_process(audio, self.fx)
+            write_wav(dst, audio)
+        return dst
 
     def render_silero(self, text, dst):
         import html
@@ -690,6 +713,8 @@ class Speaker:
     def render(self, text, dst):
         """Синтез в wav-файл dst (с живой интонацией и эффектами) или в mp3, если обработка не удалась.
         Возвращает путь к готовому файлу."""
+        if self.engine == "kokoro":
+            return self.render_kokoro(text, dst)
         if self.engine == "silero":
             try:
                 return self.render_silero(text, dst)
@@ -746,7 +771,7 @@ class Speaker:
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------
     def _cache_path(self, text):
         import hashlib
-        backend = self.engine
+        backend = (f"kokoro-capri-ru-v1:{self.kokoro_speed}" if self.engine == "kokoro" else self.engine)
         key = "|".join(map(str, (text, backend, self.voice, self.rate, self.pitch, self.shift, self.lively,
                                  self.fx, self.volume, self.silero_voice)))
         return os.path.join(TTS_CACHE, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".wav")

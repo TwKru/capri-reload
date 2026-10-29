@@ -104,13 +104,15 @@ DEFAULTS = {
     "wake_words": ["капри", "каприз", "капре", "кепри", "капли"],
     "use_google_stt": True,
     "voice": "ru-RU-SvetlanaNeural",
-    "tts_engine": "edge",
+    "tts_engine": "kokoro",
+    "kokoro_speed": 1.0,
+    "kokoro_threads": 2,
     "tts_timeout_seconds": 8,
     "voice_rate": "+10%",
     "voice_pitch": "+15Hz",
     "voice_shift": 0,
     "voice_lively": False,
-    "voice_fx": 1.8,
+    "voice_fx": 0,
     "listen_window_seconds": 8,
     "phrase_pause_seconds": 0.9,  # ожидание продолжения после короткой паузы, выделенной Vosk
     "followup_seconds": 0,
@@ -367,7 +369,7 @@ class Capri(QObject):
 
     def _prewarm_voice(self):
         """Через полминуты после запуска озвучиваем в фоне постоянные фразы и свои ответы — потом они
-        звучат сразу, без ожидания сервера Microsoft."""
+        звучат сразу, без повторного синтеза."""
         time.sleep(30)
         static = [gendered(t) for variants in LINES.values() for t in variants if "{" not in t]
         static = self.personality.prewarm_phrases() + static
@@ -668,7 +670,7 @@ class Capri(QObject):
                 self.listener.sensitivity = self.cfg["mic_sensitivity"]
 
     def set_voice_fx(self, strength):
-        """Сила цифровых эффектов голоса: 0 — чистый голос, 1.8 — как задумано, больше — сильнее."""
+        """Сила цифровых эффектов голоса: 0 — чистый голос, больше — сильнее цифровая обработка."""
         self.speaker.fx = round(float(strength), 2)
         self.cfg["voice_fx"] = self.speaker.fx
         save_setting("voice_fx", self.speaker.fx)
@@ -971,6 +973,8 @@ class Capri(QObject):
     def _check_voice_blocked(self):
         """Голос Microsoft не прошёл из-за сети, а запущен zapret — один раз за сеанс объясняем
         и предлагаем добавить сервер голоса в исключения zapret."""
+        if self.speaker.engine == "kokoro":
+            return
         err = self.speaker.edge_error
         if self.zapret_checked or not err or not zapret.NETWORK_ERROR.search(err) or not zapret.running():
             return

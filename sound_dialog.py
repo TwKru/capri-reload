@@ -49,7 +49,7 @@ class SoundDialog(QDialog):
                                    "QSlider::sub-page:horizontal { background: #ff2260; }")
         cfg = capri.cfg
         self.volume = _slider(0, 100, int(cfg.get("voice_volume", 100)))
-        self.fx = _slider(0, 250, int(float(cfg.get("voice_fx", 1.8)) * 100))
+        self.fx = _slider(0, 250, int(float(cfg.get("voice_fx", 0)) * 100))
         self.gain = _slider(50, 400, int(float(cfg.get("mic_gain", 1.0)) * 100))
         self.sens = _slider(0, 100, int(cfg.get("mic_sensitivity", 100)))
         self.vol_label, self.gain_label, self.sens_label, self.fx_label = QLabel(), QLabel(), QLabel(), QLabel()
@@ -69,7 +69,8 @@ class SoundDialog(QDialog):
         lay.addLayout(self._row("Громкость:", self.gain, self.gain_label))
         lay.addLayout(self._row("Чувствительность:", self.sens, self.sens_label))
         lay.addWidget(self.meter)
-        hint = QLabel("Эффекты: 0 — чистый голос, ×1.8 — как задумано. Нажми «Проверить голос», чтобы послушать.\n"
+        hint = QLabel("Эффекты: 0 — голос как в capri-desktop; больше — сильнее цифровая обработка.\n"
+                      "Нажми «Проверить голос», чтобы послушать.\n"
                       "Скажи что-нибудь: полоска должна заходить за розовую отметку и становиться зелёной.\n"
                       "Не слышит — прибавь громкость. Реагирует на шум — убавь чувствительность.\n"
                       "Общие настройки звука Windows не меняются.")
