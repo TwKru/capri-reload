@@ -494,10 +494,6 @@ def silero_prosody(sentence, base, rnd, lively=True):
 TTS_CACHE = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "Capri", "tts_cache")
 CACHE_MAX_TEXT = 160    # фразы длиннее не кэшируем
 CACHE_MAX_FILES = 600   # сколько готовых фраз хранить (~30 МБ)
-PROFANITY = re.compile(r"\b(?:бляд\w*|бля|(?:за|разъ|вы|на|до|от|по|про|у)?[её]б\w*|[оа]ху[еёи]\w*|пизд\w*|"
-                       r"ху[йеёяию]\w*|хули\w*|нахуй|ниху\w*|доху\w*|долбо[её]б\w*)\b", re.I)
-
-
 def _trim_cache():
     try:
         with os.scandir(TTS_CACHE) as entries:
@@ -545,12 +541,7 @@ class Speaker:
         """Перебить: можно вызывать из любого потока."""
         self.stop_event.set()
 
-    def _local_profanity(self, text):
-        return self.engine != "silero" and bool(PROFANITY.search(text))
-
     def _render_ok(self, text):
-        if self._local_profanity(text):
-            return  # локальный голос не доказывает, что сетевой сервис восстановился
         self._last_render_ok = time.monotonic()
         self.edge_error = None
         self._edge_failures = 0
@@ -564,7 +555,7 @@ class Speaker:
             return False
         cached = os.path.isfile(self._cache_path(text))
         started = time.monotonic()
-        if cached or time.monotonic() >= self._edge_retry_at or self.engine == "silero" or self._local_profanity(text):
+        if cached or time.monotonic() >= self._edge_retry_at or self.engine == "silero":
             try:
                 interrupted = self._edge(text)
                 if not cached:
@@ -578,10 +569,7 @@ class Speaker:
                     except OSError:
                         pass
             except Exception as e:
-                if self._local_profanity(text):
-                    log.exception("Локальный синтез не удался, пробую прямую речь Windows")
-                else:
-                    self._edge_failed(e, started)
+                self._edge_failed(e, started)
         elif self._edge_retry_at - time.monotonic() <= 5 and self._recovery_lock.acquire(blocking=False):
             def recover():
                 try:
@@ -616,7 +604,7 @@ class Speaker:
             return False
         if not force and os.path.isfile(self._cache_path(text)):
             return True
-        if not force and time.monotonic() < self._edge_retry_at and not self._local_profanity(text):
+        if not force and time.monotonic() < self._edge_retry_at:
             return False
         started = time.monotonic()
         try:
@@ -628,48 +616,8 @@ class Speaker:
             self._render_ok(text)
             return os.path.isfile(self._cache_path(text))
         except Exception as error:
-            if not self._local_profanity(text):
-                self._edge_failed(error, started)
+            self._edge_failed(error, started)
             return False
-
-    def render_sapi(self, text, dst):
-        """Местная озвучка без сетевой фильтрации; сохраняем тембр обработки и готовый WAV в общем кэше."""
-        import comtypes
-        import comtypes.client
-        comtypes.CoInitialize()
-        sp = stream = voices = None
-        try:
-            with tempfile.TemporaryDirectory(prefix="capri_sapi_") as folder:
-                raw = os.path.join(folder, "voice.wav")
-                sp = comtypes.client.CreateObject("SAPI.SpVoice")
-                voices = sp.GetVoices()
-                best = -1
-                for i in range(voices.Count):
-                    voice = voices.Item(i)
-                    desc = voice.GetDescription().lower()
-                    score = 2 if "irina" in desc or "ирина" in desc else int(any(w in desc for w in ("russian", "pavel", "павел")))
-                    if score > best and score:
-                        sp.Voice, best = voice, score
-                sp.Volume = max(0, min(100, self.volume))
-                sp.Rate = max(-10, min(10, round((_pct(self.rate) - (2 ** (self.shift / 12) - 1) * 100) / 10)))
-                stream = comtypes.client.CreateObject("SAPI.SpFileStream")
-                stream.Open(raw, 3)
-                try:
-                    sp.AudioOutputStream = stream
-                    sp.Speak(text, 16)  # SVSFIsNotXML, синхронная запись в файл, без вывода на колонки
-                finally:
-                    stream.Close()
-                try:
-                    audio = pitch_shift(trim_silence(decode(raw)), self.shift)
-                    if self.fx > 0:
-                        audio = fx_process(audio, self.fx)
-                    write_wav(dst, audio, volume=self.volume)
-                except Exception:
-                    shutil.copyfile(raw, dst)
-                return dst
-        finally:
-            sp = stream = voices = None
-            comtypes.CoUninitialize()
 
     def render_silero(self, text, dst):
         import html
@@ -699,8 +647,6 @@ class Speaker:
                 return self.render_silero(text, dst)
             except Exception:
                 log.exception("Silero не сработал, говорю голосом Microsoft")
-        if PROFANITY.search(text):
-            return self.render_sapi(text, dst)
         import edge_tts
         # по предложениям: они синтезируются параллельно, поэтому длинный ответ ждём как одно предложение
         sentences = [s for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()] or [text]
@@ -752,7 +698,7 @@ class Speaker:
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------
     def _cache_path(self, text):
         import hashlib
-        backend = "sapi-profanity-v1" if self._local_profanity(text) else self.engine
+        backend = self.engine
         key = "|".join(map(str, (text, backend, self.voice, self.rate, self.pitch, self.shift, self.lively,
                                  self.fx, self.volume, self.silero_voice)))
         return os.path.join(TTS_CACHE, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".wav")

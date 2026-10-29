@@ -2,7 +2,7 @@
 import io
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import local_ai
 import persona
@@ -97,29 +97,37 @@ class CasualStyleTests(unittest.TestCase):
 
 
 class UncensoredVoiceTests(unittest.TestCase):
-    def test_profanity_uses_local_render_without_network(self):
-        speaker = voice.Speaker({})
-        for text in ("Готово. Заебись.", "Ебучий браузер опять завис.", "Охуенно.", "Хуёвый день."):
-            with self.subTest(text=text), patch.object(speaker, "render_sapi", return_value="local.wav") as local, \
-                    patch("edge_tts.Communicate") as network:
-                self.assertEqual(speaker.render(text, "local.wav"), "local.wav")
-            local.assert_called_once_with(text, "local.wav")
-            network.assert_not_called()
+    def test_profanity_uses_selected_online_voice_and_effects(self):
+        import numpy as np
+        speaker = voice.Speaker({"voice": "ru-RU-SvetlanaNeural"})
+        text = "Готово. Заебись."
+        with patch("edge_tts.Communicate") as network, \
+                patch("voice.decode", return_value=np.zeros(200, np.float32)), \
+                patch("voice.write_wav") as output:
+            network.return_value.save = AsyncMock()
+            self.assertEqual(speaker.render(text, "voice.wav"), "voice.wav")
+        self.assertEqual(network.call_count, 2)
+        self.assertEqual([c.args[0] for c in network.call_args_list], ["Готово.", "Заебись."])
+        self.assertTrue(all(c.args[1] == speaker.voice for c in network.call_args_list))
+        output.assert_called_once()
 
-    def test_local_speech_works_during_outage_without_resetting_network_health(self):
+    def test_profanity_does_not_use_old_windows_voice_cache(self):
+        import hashlib
         speaker = voice.Speaker({})
-        speaker._edge_retry_at = float("inf")
-        speaker.edge_error = "network unavailable"
-        with patch("voice.os.path.isfile", return_value=False), patch.object(speaker, "_edge", return_value=False) as render:
-            speaker.say("Готово. Заебись.")
-        render.assert_called_once()
-        self.assertEqual(speaker.edge_error, "network unavailable")
-        self.assertEqual(speaker._edge_retry_at, float("inf"))
+        text = "Готово. Заебись."
+        old_key = "|".join(map(str, (text, "sapi-profanity-v1", speaker.voice, speaker.rate,
+            speaker.pitch, speaker.shift, speaker.lively, speaker.fx, speaker.volume, speaker.silero_voice)))
+        self.assertNotIn(hashlib.sha1(old_key.encode()).hexdigest(), speaker._cache_path(text))
 
-    def test_plain_speech_keeps_its_normal_backend(self):
-        speaker = voice.Speaker({})
-        self.assertFalse(speaker._local_profanity("Открываю программу CS2."))
-        self.assertFalse(speaker._local_profanity("Подстрахуй меня."))
+    def test_network_failure_keeps_fallback_for_all_text(self):
+        for text in ("Готово.", "Заебись."):
+            speaker = voice.Speaker({})
+            with patch("voice.os.path.isfile", return_value=False), \
+                    patch.object(speaker, "_edge", side_effect=RuntimeError("offline")), \
+                    patch.object(speaker, "_sapi", return_value=False) as fallback:
+                speaker.say(text)
+            fallback.assert_called_once_with(text)
+            self.assertGreater(speaker._edge_retry_at, 0)
 
 
 if __name__ == "__main__":
