@@ -69,6 +69,19 @@ class DesktopInteractionTests(unittest.TestCase):
         self.assertEqual(self.view.mode, "listening")
         self.assertTrue(self.view.isVisible())
 
+    def test_waiting_uses_lying_sprite_without_entering_sleep(self):
+        self.view.idle_started = 100
+        for mode in ("idle", "listening"):
+            self.view.set_mode(mode)
+            with patch("avatar.time.time", return_value=100):
+                self.assertEqual(self.view._figure(), self.view.roam_img)
+            self.assertFalse(self.view.sleeping)
+        self.view.set_mode("thinking")
+        self.assertEqual(self.view.anim, "eyes")
+        self.view.set_mode("speaking")
+        with patch("avatar.time.time", return_value=100):
+            self.assertEqual(self.view._figure(), self.view.anims["desktop_idle"][0])
+
     def test_game_mode_keeps_idle_static_and_allows_explicit_dance(self):
         self.view.set_game_mode(True)
         first = self.view._figure()

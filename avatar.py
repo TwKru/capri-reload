@@ -902,7 +902,7 @@ class Avatar(QWidget):
             self.update()
             return
         elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None
-              and self.anim is None and not self.game_mode and "desktop_blink" in self.anims and now >= self.next_blink):
+              and self.anim is None and self.roam_img is None and "desktop_sleep" not in self.anims and not self.game_mode and "desktop_blink" in self.anims and now >= self.next_blink):
             self.play_anim("desktop_blink")
             self.next_blink = now + random.uniform(3, 7)
         elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None and self.anim is None and
@@ -943,6 +943,13 @@ class Avatar(QWidget):
             self.anim = None
         if self.roaming and self.roam_img is not None:
             return self.roam_img
+        if self.mode in ("idle", "listening") and self.roam_img is not None:
+            # Исходная лежачая поза; ожидание не включает режим сна.
+            return self.roam_img
+        if self.mode in ("idle", "listening") and "desktop_sleep" in self.anims:
+            frames = self.anims["desktop_sleep"]
+            index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)
+            return frames[index]
         if "desktop_idle" in self.anims:
             frames = self.anims["desktop_idle"]
             index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)

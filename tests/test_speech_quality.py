@@ -75,25 +75,22 @@ class SpeechQualityTests(unittest.TestCase):
 
 
 class CasualStyleTests(unittest.TestCase):
-    def test_casual_script_happens_regularly_and_preserves_target(self):
+    def test_casual_script_is_rare_and_preserves_target(self):
         target = "CS2 {name} 30"
         with patch.object(persona, "_CASUAL_TURN", 0), patch("persona.random.choice", side_effect=lambda values: values[0]):
-            first = persona.line("open", t=target)
-            second = persona.line("open", t=target)
-        self.assertIn(target, first)
-        self.assertIn(target, second)
-        self.assertNotIn("блядь", first)
-        self.assertIn("блядь", second)
+            replies = [persona.line("open", t=target) for _ in range(24)]
+        self.assertTrue(all(target in reply for reply in replies))
+        self.assertEqual(sum("блядь" in reply for reply in replies), 2)
+        self.assertNotIn("listen", persona.CASUAL_VARIANTS)
+        self.assertNotIn("greet", persona.CASUAL_VARIANTS)
 
-    def test_happy_mood_does_not_override_all_casual_variants(self):
+    def test_happy_mood_does_not_append_profanity_to_commands(self):
         person = Personality(persist=False)
         person.react("ты молодец")
-        first = person.command_line("roam", "default")
-        second = person.command_line("roam", "default")
-        self.assertNotIn("Блядь", first)
-        self.assertIn("Блядь", second)
+        for _ in range(24):
+            self.assertNotIn("Блядь", person.command_line("roam", "default"))
         self.assertFalse(person.strongly_hurt)
-        self.assertIn("без оскорблений", person.context())
+        self.assertIn("без мата", person.context())
 
 
 class UncensoredVoiceTests(unittest.TestCase):

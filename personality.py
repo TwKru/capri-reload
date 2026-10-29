@@ -66,9 +66,8 @@ REPLIES = {
     "sorry_neutral": ("Всё нормально, я не сержусь.", "Да всё хорошо. Продолжаем."),
     "joke": ("Ага, подловил. Ладно, мир.", "Вот хитрость. Хорошо, шутка засчитана."),
     "praise": ("Вот теперь приятно. Постараюсь не зазнаться.", "Спасибо! Я сейчас очень довольная.",
-               "Засчитано. Мои пиксели довольно улыбаются.", "Охуенно приятно. Спасибо!"),
-    "thanks": ("Пожалуйста. Рада, что пригодилась.", "Обращайся. Люблю, когда всё получается.", "Всегда пожалуйста.",
-               "Да пожалуйста. Заебись, что получилось."),
+               "Засчитано. Мои пиксели довольно улыбаются."),
+    "thanks": ("Пожалуйста. Рада, что пригодилась.", "Обращайся. Люблю, когда всё получается.", "Всегда пожалуйста."),
     "thanks_hurt": ("Пожалуйста. Вот так уже приятнее.", "Обращайся. Я уже оттаиваю."),
     "tease": ("Вредина — это часть комплектации.", "Да, немного колючая. Зато со мной не скучно.",
               "Хитрая, быстрая, временами невыносимая. Всё по плану."),
@@ -124,7 +123,6 @@ class Personality:
         self._mood, self._until, self._strikes = "neutral", 0.0, 0
         self.last_interaction = self.clock()
         self._last_reply = {}
-        self._casual_turn = 0
         if enabled and persist:
             self._load()
 
@@ -175,7 +173,7 @@ class Personality:
             return ""
         if self.strongly_hurt:
             return MOOD_CONTEXT["hurt"] + "\n" + ANGRY_CONTEXT
-        return MOOD_CONTEXT[self.mood] + "\nДопустим редкий разговорный мат без оскорблений пользователя. Жёстких личных наездов сейчас не допускай."
+        return MOOD_CONTEXT[self.mood] + "\nВ обычном ответе говори без мата. Крепкое междометие допустимо лишь изредка при сильной эмоции. Жёстких личных наездов сейчас не допускай."
 
     @property
     def strongly_hurt(self):
@@ -185,10 +183,6 @@ class Personality:
         if self.strongly_hurt:
             return ANGRY_COMMAND_LINES.get(key, default)
         text = COMMAND_LINES.get(self.mood, {}).get(key, default) if self.enabled else default
-        if text != default and self.enabled:
-            self._casual_turn += 1
-            if self._casual_turn % 2 == 0:
-                text += " Блядь, погнали."
         return text
 
     def prewarm_phrases(self):
