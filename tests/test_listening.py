@@ -17,6 +17,8 @@ class ListeningTests(unittest.TestCase):
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), \
                 patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             self.capri = main.Capri(cfg)
+        self.capri.web = Mock()
+        self.capri.web.ask.return_value = []
         self.capri.reload_config_if_changed = Mock()
         self.capri.actions.handle.return_value = Reply("Готово.")
         self.capri.actions.is_fast_command.return_value = False
@@ -43,6 +45,67 @@ class ListeningTests(unittest.TestCase):
             self.capri.on_final("капри поставь лайк песне", b"audio")
         appear.assert_called_once()
         self.assertEqual(self.capri.jobs.get_nowait()[1], "поставь лайк песне")
+
+    def test_failed_local_answer_uses_web_evidence_without_opening_browser(self):
+        self.capri.local = Mock()
+        self.capri.local.ask.side_effect = [None, "Свет рассеивается в атмосфере."]
+        self.capri.ai.available = False
+        self.capri.actions.handle.return_value = None
+        sources = [{"title": "Физика", "url": "https://example.org/sky", "text": "Рассеяние света."}]
+        self.capri.web.ask.return_value = sources
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("Почему небо голубое?")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.web.ask.assert_called_once_with("Почему небо голубое?")
+        self.assertEqual(self.capri.local.ask.call_count, 2)
+        self.assertEqual(self.capri.local.ask.call_args.kwargs["web_context"], sources)
+        self.capri.actions.web.assert_not_called()
+        self.capri.say.assert_called_once_with("Свет рассеивается в атмосфере.")
+
+    def test_search_failure_is_spoken_without_opening_a_browser(self):
+        self.capri.local = Mock()
+        self.capri.local.ask.return_value = None
+        self.capri.ai.available = False
+        self.capri.actions.handle.return_value = None
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("Какая погода сегодня?")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.web.ask.assert_called_once()
+        self.capri.actions.web.assert_not_called()
+        self.capri.actions.fallback.assert_not_called()
+        self.assertIn("Не удалось получить сведения", self.capri.say.call_args.args[0])
+
+    def test_automatic_search_can_be_disabled_without_opening_browser(self):
+        self.capri.cfg["search_when_unsure"] = False
+        self.capri.local = Mock()
+        self.capri.local.ask.return_value = None
+        self.capri.ai.available = False
+        self.capri.actions.handle.return_value = None
+        self.capri.actions.fallback.return_value = Reply("Не знаю ответа.")
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("Вопрос")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.web.ask.assert_not_called()
+        self.capri.actions.web.assert_not_called()
+        self.capri.say.assert_called_once_with("Не знаю ответа.")
+
+    def test_explicit_research_skips_uninformed_answer_and_remains_cancellable(self):
+        self.capri.actions.handle.return_value = Reply("история Python", "research")
+        self.capri.ai.available = False
+        completed = threading.Event()
+        def fetch(question):
+            self.capri.stop_listening()
+            completed.set()
+            return [{"title": "Python", "url": "https://python.org/", "text": "Поздний результат."}]
+        self.capri.web.ask.side_effect = fetch
+        self.capri.local = Mock()
+        self.capri.say = Mock(return_value=False)
+        self.capri.on_final("капри найди информацию про Python", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertTrue(completed.wait(1))
+        self.capri.local.ask.assert_not_called()
+        self.capri.say.assert_not_called()
+        self.assertEqual(self.capri.last_web_sources, [])
 
     def test_question_accepts_one_reply_without_name(self):
         self.capri.actions.handle.return_value = Reply("Какую музыку ты любишь?")

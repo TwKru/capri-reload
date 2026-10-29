@@ -19,3 +19,7 @@ winrt-Windows.Media.Control>=2.0
 winrt-Windows.Media>=2.0
 winrt-Windows.Foundation>=2.0
 winrt-Windows.Foundation.Collections>=2.0
+
+# Фоновый веб-поиск без API-ключа; совместимый транспорт для ddgs 9.10
+ddgs==9.10.0
+primp>=0.15,<1

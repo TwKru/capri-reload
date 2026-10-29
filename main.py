@@ -51,13 +51,14 @@ def fatal(text):
 try:
     from PySide6.QtCore import QObject, Qt, Signal, QTimer
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
-    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QSlider,
+    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox, QSlider,
                                    QSystemTrayIcon, QWidget, QWidgetAction)
 
     from actions import CAPRI_URL, Actions, Reply
     from ai import AI
     from local_ai import LocalAI
     from intent_router import IntentRouter
+    from web_search import WebSearch, source_excerpt
     from persona import LINES, gendered, line, set_user
     from avatar import Avatar
     import zapret
@@ -281,6 +282,8 @@ class Capri(QObject):
         self.ai.personality = self.personality
         self.local = LocalAI(cfg) if cfg.get("local_ai") else None
         self.router = IntentRouter(cfg) if cfg.get("intent_router", True) else None
+        self.web = WebSearch()
+        self.last_web_sources = []
         if self.local:
             self.local.on_model_change = self._remember_model
             self.local.personality = self.personality
@@ -297,6 +300,7 @@ class Capri(QObject):
         self.command_serial = 0
         self.ai_call_lock = threading.Lock()
         self.router_call_lock = threading.Lock()
+        self.web_call_lock = threading.Lock()
         self.update_process = None
         self.game_active = False
         self._game_memory_released = False
@@ -605,10 +609,10 @@ class Capri(QObject):
         log.info("Самостоятельные появления: %s", "включены" if on else "выключены")
 
     def set_search_when_unsure(self, on):
-        """Галочка в трее: открывать ли Google, когда Капри не знает ответа. Сразу и запоминается."""
+        """Галочка в трее: искать ли сведения в фоне при нехватке данных. Сразу и запоминается."""
         self.cfg["search_when_unsure"] = bool(on)
         save_setting("search_when_unsure", bool(on))
-        log.info("Поиск в браузере, если не знаю: %s", "включён" if on else "выключен")
+        log.info("Фоновый поиск для ответа: %s", "включён" if on else "выключен")
 
     def _remember_model(self, name):
         """Ollama нашла другую скачанную модель — записываем её, чтобы не искать при каждом запуске."""
@@ -746,7 +750,7 @@ class Capri(QObject):
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
 
-    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None):
+    def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None, evidence=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
         call_lock = lock if lock is not None else self.ai_call_lock
         while not call_lock.acquire(blocking=False):
@@ -779,7 +783,12 @@ class Capri(QObject):
         def ask():
             try:
                 if on_sentence and isinstance(working, LocalAI):
-                    result[0] = working.ask(question, on_sentence=sentence)
+                    kwargs = {"on_sentence": sentence}
+                    if evidence is not None:
+                        kwargs["web_context"] = evidence
+                    result[0] = working.ask(question, **kwargs)
+                elif evidence is not None:
+                    result[0] = working.ask(question, web_context=evidence)
                 elif context is not None and method == "ask":
                     result[0] = working.ask(question, context=context)
                 else:
@@ -930,6 +939,9 @@ class Capri(QObject):
             return
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
+        research_query = reply.text if reply is not None and reply.action == "research" else None
+        if research_query is not None:
+            reply = None
         if reply is None:
             ai_cancelled = lambda: cancelled() or serial != self.command_serial
 
@@ -940,18 +952,32 @@ class Capri(QObject):
                 streamed = True
                 return self.say(text)
 
-            if self.cfg.get("enable_ai") and self.ai.available:
-                answer = self._ask_ai(self.ai, cmd, ai_cancelled)
-                if answer is AI_CANCELLED:
+            answer = None
+            external = self.cfg.get("enable_ai") and self.ai.available
+            if external:
+                answer = self._ask_ai(self.ai, research_query or cmd, ai_cancelled)
+            elif not research_query and self.local:
+                answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence)
+            if answer is AI_CANCELLED or ai_cancelled():
+                return
+            if not answer and not dismissal and (research_query is not None or self.cfg.get("search_when_unsure", True)):
+                self.last_web_sources = []
+                sources = self._ask_ai(self.web, research_query or cmd, ai_cancelled, lock=self.web_call_lock)
+                if sources is AI_CANCELLED or ai_cancelled():
                     return
-                reply = Reply(answer or "Не удалось получить ответ нейросети. Попробуй ещё раз.", "answer")
-            else:
-                answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence) if self.local else None
-                if answer is AI_CANCELLED or cancelled():
-                    return
-                reply = (Reply(answer, "answer") if answer else
-                         Reply("Если хочешь, чтобы я исчезла с экрана, скажи: Капри, спрячься.", "answer")
-                         if dismissal else self.actions.fallback(cmd, force_search=bool(self.local)))
+                if sources:
+                    self.last_web_sources = sources
+                    if self.local:
+                        answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence, evidence=sources)
+                        if answer is AI_CANCELLED or ai_cancelled():
+                            return
+                    if not answer:
+                        answer = source_excerpt(sources)
+                else:
+                    answer = "Не удалось получить сведения из интернета. Попробуй позже или уточни вопрос."
+            reply = (Reply(answer, "answer") if answer else
+                     Reply("Если хочешь, чтобы я исчезла с экрана, скажи: Капри, спрячься.", "answer")
+                     if dismissal else self.actions.fallback(cmd, force_search=bool(self.local)))
         if cancelled():
             return
         if streamed:
@@ -1111,10 +1137,21 @@ def main():
         from profile_dialog import ProfileDialog
         show_window("profile", lambda: ProfileDialog(capri))
 
+    def show_sources():
+        sources = capri.last_web_sources
+        text = "\n\n".join(f"{item['title']}\n{item['url']}" for item in sources) if sources else "Для последнего веб-поиска источников пока нет."
+        dialog = QMessageBox()
+        dialog.setWindowTitle("Источники ответа Капри")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        dialog.setText(text)
+        show_window("sources", lambda: dialog)
+
     menu = QMenu()
     for title, fn in (("Позвать Капри", capri.call_from_click),
                       ("Замолчать", capri.stop_listening),
                       ("Написать команду…", ask_text),
+                      ("Источники последнего веб-ответа…", show_sources),
                       ("Мои сайты, программы и ответы…", open_entries),
                       ("Как ко мне обращаться…", open_profile),
                       ("Проверить ПК", lambda: capri.text_command("проверь компьютер")),
@@ -1193,8 +1230,8 @@ def main():
             vol_menu.aboutToShow.connect(sync_volume)
             continue
         if title == "SEARCH":
-            # галочка: открывать ли Google, когда Капри не знает ответа (search_when_unsure)
-            search_act = QAction("Искать в браузере, если не знаю", menu)
+            # Фоновый поиск сведений, когда локального ответа недостаточно
+            search_act = QAction("Искать в интернете для ответа", menu)
             search_act.setCheckable(True)
             search_act.toggled.connect(capri.set_search_when_unsure)
             menu.addAction(search_act)
