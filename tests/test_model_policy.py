@@ -49,6 +49,14 @@ class GameDetectionTests(unittest.TestCase):
 
 
 class ModelChoiceTests(unittest.TestCase):
+    def test_temporary_ollama_failure_does_not_cache_missing_model_or_switch_to_heavy(self):
+        models = ConversationModels({})
+        installed = Mock(side_effect=[None, ["qwen3:8b", "qwen3:1.7b"]])
+        with patch("model_policy.game_running", return_value=True):
+            self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
+            self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
+        self.assertEqual(installed.call_count, 2)
+
     def test_game_uses_installed_light_model_and_desktop_uses_normal(self):
         models = ConversationModels({})
         installed = Mock(return_value=["qwen3:8b", "qwen3:1.7b", "qwen3:0.6b"])

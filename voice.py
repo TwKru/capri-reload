@@ -763,7 +763,7 @@ class Speaker:
         base = os.path.splitext(dst)[0]
         parts = [f"{base}_{i}.mp3" for i in range(len(sentences))]
 
-        async def go():  # фразы синтезируются параллельно — задержка как у одной
+        async def go(items=None):  # фразы синтезируются параллельно — задержка как у одной
             limit = asyncio.Semaphore(3)
             async def synthesize(sentence, rate, path):
                 async with limit:
@@ -776,8 +776,9 @@ class Speaker:
                                     "NoAudioReceived", "ClientConnectionError", "ServerDisconnectedError", "ClientConnectorError"}:
                                 raise
                             await asyncio.sleep(0.15)
+            requests = items if items is not None else zip(sentences, rates, parts, strict=True)
             task = asyncio.ensure_future(asyncio.wait_for(asyncio.gather(*(synthesize(s, r, f)
-                for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout))
+                for s, r, f in requests)), timeout=self.tts_timeout))
             try:
                 while not task.done():
                     cancellation.checkpoint()
@@ -806,10 +807,7 @@ class Speaker:
             if len(parts) == 1:
                 return parts[0]
             fallback = base + ".mp3"
-            async def fallback_audio():
-                await asyncio.wait_for(edge_tts.Communicate(text, self.voice, rate=self.rate,
-                                                           pitch=self.pitch).save(fallback), timeout=self.tts_timeout)
-            asyncio.run(fallback_audio())
+            asyncio.run(go([(text, self.rate, fallback)]))
             return fallback
 
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------

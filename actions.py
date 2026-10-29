@@ -1749,7 +1749,7 @@ class Actions:
     def chat(self, c, m):
         """«первый чат», «чат мама» — открывает чат в Telegram (запускает его, если надо)."""
         if not automation.find_window(("telegram",)):
-            found = self.index.find("телеграм", {"телеграм": "telegram"}) if self.index.ready.wait(8) else None
+            found = self.index.find("телеграм", {"телеграм": "telegram"}) if cancellation.wait_event(self.index.ready, 8) else None
             if not found:
                 return Reply(line("app_missing", t="Telegram"), "fail")
             self.index.launch(found[1])
@@ -2205,7 +2205,7 @@ class Actions:
             return Reply(line("open", t=domain))
 
         if not site_mode:
-            self.index.ready.wait(timeout=8)
+            cancellation.wait_event(self.index.ready, 8)
             options = self.index.candidates(t, self.aliases)
             if self.program_lookup and is_abbreviation(t) and (not options or options[0][0] < 0.9):
                 resolved = self._web_program_options(t)

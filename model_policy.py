@@ -109,8 +109,12 @@ class ConversationModels:
         if not self.enabled or not game_running(self.additional):
             return normal
         if self.names is None or time.monotonic() - self.checked > 30:
-            self.names = installed() or []
-            self.checked = time.monotonic()
+            names = installed()
+            if names is not None:
+                self.names = names
+                self.checked = time.monotonic()
+            elif self.names is None:
+                return self.light  # сбой связи не означает, что модель отсутствует
         if self.light not in self.names:
             log.info("Лёгкая разговорная модель %s не установлена, использую %s", self.light, normal)
             return normal

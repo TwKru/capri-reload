@@ -90,6 +90,20 @@ def wait(seconds):
         scope.event.wait(min(.05, remaining))
 
 
+def wait_event(event, timeout):
+    """Ожидать готовность фонового индекса, сохраняя немедленную отмену."""
+    deadline = time.monotonic() + timeout
+    while True:
+        checkpoint()
+        remaining = max(0.0, deadline - time.monotonic())
+        ready = event.wait(min(.05, remaining))
+        checkpoint()
+        if ready:
+            return True
+        if remaining <= .05:
+            return False
+
+
 class Job(tuple):
     def __new__(cls, value, epoch):
         job = super().__new__(cls, value)

@@ -14,6 +14,57 @@ import voice
 
 
 class CancellationTests(unittest.TestCase):
+    def test_index_wait_can_be_cancelled_before_eight_second_timeout(self):
+        scope = cancellation.Scope()
+        started, finished = threading.Event(), threading.Event()
+        results = []
+        def wait_index():
+            try:
+                with scope.bind():
+                    started.set()
+                    cancellation.wait_event(threading.Event(), 8)
+            except cancellation.RequestCancelled:
+                results.append("cancelled")
+            finally:
+                finished.set()
+        worker = threading.Thread(target=wait_index, daemon=True)
+        worker.start()
+        self.assertTrue(started.wait(1))
+        scope.cancel()
+        self.assertTrue(finished.wait(1))
+        worker.join(1)
+        self.assertEqual(results, ["cancelled"])
+        event = threading.Event()
+        self.assertFalse(cancellation.wait_event(event, 0))
+        event.set()
+        self.assertTrue(cancellation.wait_event(event, 0))
+
+    def test_stop_cancels_fallback_voice_synthesis_after_processing_failure(self):
+        started, finished = threading.Event(), threading.Event()
+        speaker = voice.Speaker({"tts_engine": "edge"})
+        results = []
+        async def save(path):
+            if Path(path).name == "voice.mp3":
+                started.set()
+                await asyncio.sleep(10)
+        with tempfile.TemporaryDirectory() as folder, patch("edge_tts.Communicate") as edge, \
+                patch("voice.decode", side_effect=ValueError("bad audio")):
+            edge.return_value.save = save
+            def render():
+                try:
+                    speaker.render("Первая фраза. Вторая фраза.", str(Path(folder) / "voice.wav"))
+                except cancellation.RequestCancelled:
+                    results.append("cancelled")
+                finally:
+                    finished.set()
+            worker = threading.Thread(target=render, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(2))
+            speaker.stop()
+            self.assertTrue(finished.wait(1))
+            worker.join(1)
+        self.assertEqual(results, ["cancelled"])
+
     def test_old_jobs_are_discarded_but_new_jobs_survive(self):
         epoch = [0]
         jobs = cancellation.JobQueue(lambda: epoch[0])

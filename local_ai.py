@@ -311,7 +311,7 @@ class LocalAI:
                    "options": self._options(384)}
         req = urllib.request.Request(URL + "/api/chat", data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
-        raw, emitted, truncated = "", 0, False
+        raw, emitted, truncated, finished = "", 0, False, False
         with cancellation.open_url(req, timeout=self.timeout) as response:
             for line in response:
                 cancellation.checkpoint()
@@ -330,7 +330,10 @@ class LocalAI:
                     on_sentence(parts[emitted])
                     emitted += 1
                 if chunk.get("done"):
+                    finished = True
                     break
+        if not finished:
+            raise OSError("Поток ответа ИИ оборвался до завершения")
         text = strip_reasoning(raw)
         return " ".join(complete_sentences(text, final=True, keep_tail=False)) if truncated else text
 

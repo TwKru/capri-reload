@@ -15,6 +15,23 @@ def stream(*chunks):
 
 
 class SpeechQualityTests(unittest.TestCase):
+    def test_abrupt_stream_end_does_not_speak_unfinished_text(self):
+        ai = local_ai.LocalAI({})
+        spoken = []
+        with patch("local_ai.urllib.request.urlopen", return_value=stream(
+                {"message": {"content": "Этот ответ оборвался посреди длинного предложения и больше ничего не пришло"}})):
+            self.assertIsNone(ai.ask("Объясни", on_sentence=spoken.append))
+        self.assertEqual(spoken, [])
+        self.assertEqual(ai.history, [])
+
+    def test_abrupt_stream_keeps_only_already_completed_sentences(self):
+        spoken = []
+        with patch("local_ai.urllib.request.urlopen", return_value=stream(
+                {"message": {"content": "Первое предложение завершено. Следующее оборвалось"}})):
+            answer = local_ai.LocalAI({}).ask("Объясни", on_sentence=spoken.append)
+        self.assertEqual(spoken, ["Первое предложение завершено."])
+        self.assertEqual(answer, spoken[0])
+
     def test_decimal_abbreviations_and_parentheses_stay_together(self):
         parts = local_ai.complete_sentences("Это 3.14 (т. е. число). Следующее предложение.", final=True)
         self.assertEqual(parts, ["Это 3.14 (т. е. число).", "Следующее предложение."])
