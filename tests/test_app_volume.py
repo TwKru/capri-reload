@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from actions import Actions
+from intent_router import Decision
 
 
 class AppVolumeTests(unittest.TestCase):
@@ -16,7 +17,8 @@ class AppVolumeTests(unittest.TestCase):
         for name, label in (("Discord.exe", "Discord"), ("Telegram.exe", "Telegram"),
                             ("steamwebhelper.exe", "Steam"), ("chatclient.exe", "Chat client"),
                             ("GamePlayer.exe", "My Game"), ("Dota2.exe", "Dota 2"),
-                            ("music.exe", "Яндекс Музыка"), ("chrome.exe", "Google Chrome")):
+                            ("music.exe", "Яндекс Музыка"), ("chrome.exe", "Google Chrome"),
+                            ("RustClient.exe", "")):
             volume = Mock()
             volume.GetMasterVolume.return_value = 0.7
             self.volumes[name.lower()] = volume
@@ -41,6 +43,34 @@ class AppVolumeTests(unittest.TestCase):
                 self.app.handle(command)
                 volume.SetMasterVolume.assert_called_once_with(0.3, None)
                 self.volumes["telegram.exe"].SetMasterVolume.assert_not_called()
+
+    def test_rust_log_commands_target_rustclient(self):
+        for command in ("громкость rust 90", "сделай громкость rust 90", "громкость раста 90"):
+            with self.subTest(command=command):
+                volume = self.volumes["rustclient.exe"]
+                volume.reset_mock()
+                with patch.object(self.app, "music") as music:
+                    self.app.handle(command)
+                volume.SetMasterVolume.assert_called_once_with(0.9, None)
+                music.assert_not_called()
+
+    def test_numeric_model_target_does_not_replace_original_app(self):
+        self.app.execute_decision(Decision("volume", "90", 10), original="громкость rust 90")
+        self.volumes["rustclient.exe"].SetMasterVolume.assert_called_once_with(0.9, None)
+
+    def test_wrong_music_decision_for_volume_cannot_play_music(self):
+        with patch.object(self.app, "music") as music:
+            reply = self.app.execute_decision(Decision("music"), original="сделай громкость rust 90")
+        music.assert_not_called()
+        self.assertEqual(reply.action, "ask")
+
+    def test_volume_self_correction_does_not_search_for_numbers(self):
+        self.app.program_lookup = Mock()
+        reply = self.app.handle("громкость браузера 25 нет")
+        self.assertEqual(reply.action, "ask")
+        self.app.program_lookup.resolve.assert_not_called()
+        for volume in self.volumes.values():
+            volume.SetMasterVolume.assert_not_called()
 
     def test_relative_volume_and_zero_delta(self):
         for command, expected in (("сделай телеграм тише", 0.6),

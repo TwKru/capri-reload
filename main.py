@@ -999,7 +999,7 @@ class Capri(QObject):
         else:
             # Сохраняем точные названия песен, программ и пользовательские команды.
             reply = self.actions.handle(cmd)
-            if reply is None or reply.action == "unresolved":
+            if reply is None:
                 routed = (None if decision.action == "search" and not self.cfg.get("search_when_unsure", True)
                           else self.actions.execute_decision(decision, original=cmd))
                 if routed is not None:

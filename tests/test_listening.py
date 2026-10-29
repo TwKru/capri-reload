@@ -658,6 +658,16 @@ class ListeningTests(unittest.TestCase):
         self.capri.router.ask.assert_called_once()
         self.assertEqual(order, ["router", "execute"])
 
+    def test_unresolved_volume_is_not_replaced_with_model_music_command(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("music")
+        self.capri.actions.handle.return_value = Reply("Не нашла звуковую сессию Rust.", "unresolved")
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("сделай громкость rust 90")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.execute_decision.assert_not_called()
+        self.capri.say.assert_called_once_with("Не нашла звуковую сессию Rust.")
+
     def test_chat_never_reaches_computer_commands(self):
         self.capri.router = Mock()
         self.capri.router.ask.return_value = Decision("chat")

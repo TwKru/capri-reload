@@ -226,7 +226,8 @@ VOLUME_RE = (r"громкост|громче|тише|(вкл|выкл|откл�
              r"\w* звук|звук (на|в) |без звука|\b(замуть|замути|мутни|размуть|размути|приглуши)\b")
 AUDIO_ALIASES = {"дискорд": "discord", "телеграм": "telegram", "телеграмм": "telegram",
                  "телега": "telegram", "стим": "steam", "спотифай": "spotify", "ватсап": "whatsapp",
-                 "зум": "zoom", "обс": "obs64", "влс": "vlc", "влц": "vlc"}
+                 "зум": "zoom", "обс": "obs64", "влс": "vlc", "влц": "vlc",
+                 "rust": "rustclient", "раст": "rustclient", "раста": "rustclient"}
 
 
 def installed_browsers():
@@ -1192,6 +1193,8 @@ class Actions:
     def execute_decision(self, decision, original=None):
         cancellation.checkpoint()
         """Только перечисленные действия. Названия и поисковый текст не разбираются как цепочки команд."""
+        if original and re.search(VOLUME_RE, norm(original)) and decision.action not in ("volume", "mute", "unmute", "chat", "command"):
+            return Reply("Уточни программу и нужную громкость. Например: громкость Rust 90.", "ask")
         if decision.action == "chat":
             return None
         if original and decision.action in ("mute", "unmute"):
@@ -1212,12 +1215,13 @@ class Actions:
         if original and decision.action == "volume":
             # Числа берём из запроса, даже если маленькая модель неверно извлекла параметр.
             target, operation = self._volume_request(norm(original))
-            target = decision.target or target
+            model_target = decision.target if not re.fullmatch(r"\d+(?:\s*%)?", decision.target) else ""
+            target = model_target or target
             if target and not self._audio_target_mentioned(target, original):
                 return Reply("Уточни, в какой программе изменить громкость.")
             number = parse_number(operation)
             if number is not None or re.search(r"громче|тише", operation):
-                return self.volume(operation + (" в " + target if target else ""), None)
+                return self.volume(norm(original), None)
         try:
             command = decision.command()
         except ValueError:
@@ -1869,6 +1873,10 @@ class Actions:
     def volume(self, c, m):
         self._resolved_audio_name = None
         target, operation = self._volume_request(c)
+        if re.search(r"\b(?:нет|отмена|отмени)\b", c):
+            return Reply("Уточни программу и нужную громкость ещё раз.", "ask")
+        if target and re.fullmatch(r"\d+(?:\s*%)?", target):
+            return Reply("Назови программу, в которой изменить громкость.", "ask")
         if target.lower() == "browser":
             target = "браузер"
         browser_names = [key for pattern, key in BROWSER_WORDS
