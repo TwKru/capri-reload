@@ -18,3 +18,5 @@ __pycache__/
 capri-update.log
 *.pyc
 *.tmp
+
+capri-crash.log

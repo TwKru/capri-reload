@@ -458,6 +458,58 @@ class SmoothAnimationFrames:
         return self.cache[index]
 
 
+class SpriteStripFrames:
+    """Lazy sprite strips: one decoded strip and eight rendered frames shared by all clips."""
+    strips = OrderedDict()
+    cache = OrderedDict()
+
+    def __init__(self, path, count, fps):
+        self.path, self.count, self.fps = path, count, fps
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        if not -self.count <= index < self.count:
+            raise IndexError(index)
+        index %= self.count
+        key = self.path, index, DPR
+        if key not in self.cache:
+            if self.path not in self.strips:
+                self.strips.clear()
+                self.strips[self.path] = QImage(self.path)
+            strip = self.strips[self.path]
+            width = strip.width() // self.count
+            src = strip.copy(index * width, 0, width, strip.height())
+            src = src.scaled(round(W * DPR), round(FIG_H * DPR), Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+            src.setDevicePixelRatio(DPR)
+            frame = canvas(W, FIG_H)
+            painter = QPainter(frame)
+            size = src.deviceIndependentSize()
+            painter.drawImage(QPointF((W - size.width()) / 2, FIG_H - size.height()), src)
+            painter.end()
+            self.cache[key] = frame
+            while len(self.cache) > 8:
+                self.cache.popitem(last=False)
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+
+def load_desktop_anims(folder):
+    clips = {"idle": ("idle", 16, 8), "blink": ("blink", 4, 8), "grin": ("grin", 16, 8),
+             "drag": ("dangle", 24, 10), "sleep": ("sleep", 16, 6), "wake": ("wake", 13, 15),
+             "dance": ("dance", 16, 12)}
+    result = {}
+    for name, (file, count, fps) in clips.items():
+        path = os.path.join(folder, file + ".png")
+        reader = QImageReader(path)
+        size = reader.size()
+        if reader.canRead() and size.width() > 0 and size.width() % count == 0 and size.height() > 0:
+            result["desktop_" + name] = SpriteStripFrames(path, count, fps)
+    return result
+
+
 def load_anims(anim_dir):
     """assets/anim/<имя>/*.png → {имя: [кадры размером W×FIG_H]}. Кадры делает tools/convert_anim.py."""
     anims = {}
@@ -487,6 +539,7 @@ def load_anims(anim_dir):
 
 class Avatar(QWidget):
     clicked = Signal()
+    petted = Signal()
     menu_requested = Signal(QPoint)
 
     def __init__(self, assets_dir):
@@ -495,6 +548,7 @@ class Avatar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(W, H)
+        self.setMouseTracking(True)
         global DPR
         DPR = max([s.devicePixelRatio() for s in QGuiApplication.screens()] or [1.0])
 
@@ -544,6 +598,17 @@ class Avatar(QWidget):
         self.on_teleport = None      # звук телепорта (ставит main)
 
         self.anims = load_anims(os.path.join(assets_dir, "anim"))
+        self.anims.update(load_desktop_anims(os.path.join(assets_dir, "desktop_sprites")))
+        self.idle_started = time.time()
+        self.next_blink = time.time() + random.uniform(3, 7)
+        self.sleeping = False
+        self.dance_until = 0.0
+        self._drag_started = 0.0
+        self._press_origin = None
+        self._pat_x = None
+        self._pat_direction = 0
+        self._pat_turns = []
+        self._last_pat = 0.0
         self.anim = None             # имя проигрываемой анимации
         self.anim_start = 0.0
         self.anim_loop = False
@@ -593,6 +658,7 @@ class Avatar(QWidget):
                 self.timer.setInterval(33)
 
     def start_roam(self):
+        self.wake_up()
         """Прогулка: Капри появляется у одного края экрана и идёт вдоль панели задач к другому."""
         if self.roam_img is None and "walk" not in self.anims:
             return
@@ -622,6 +688,8 @@ class Avatar(QWidget):
 
     def stop_motion(self):
         self.stop_roam()
+        self.sleeping = False
+        self.dance_until = 0.0
         self.anim = None
         self.lag = self.burst = 0
 
@@ -726,9 +794,13 @@ class Avatar(QWidget):
         self.next_pose = time.time() + random.uniform(12, 30)
 
     def summon(self):
+        self.wake_up()
         self.timer.start(33)
         self.stop_roam()
         if self.state in ("visible", "appearing"):
+            if not self.isVisible():
+                self.show()
+                self.raise_()
             self.burst, self.burst_level = 6, 0.9
             return
         if len(self.poses) > 1:  # каждое появление — в случайной позе
@@ -745,13 +817,34 @@ class Avatar(QWidget):
         if self.state in ("visible", "appearing"):
             self.state, self.k = "vanishing", 0
 
+    def wake_up(self):
+        if self.sleeping:
+            self.sleeping = False
+            self.hide_at = time.time() + self.hide_after
+            self.play_anim("desktop_wake")
+
     def play_anim(self, name, loop=False):
+        if name in ("sleep", "wake", "dance"):
+            name = "desktop_" + name
+        if name == "desktop_sleep":
+            self.stop_roam()
+            self.sleeping = True
+            self.hopping, self.hop_home, self.tele_target = False, None, None
+            self.hide_at = 0
+            loop = True
+        elif name == "desktop_wake":
+            self.sleeping = False
+        elif name == "desktop_dance":
+            self.dance_until = time.time() + 12
+            loop = True
         if name in self.anims:
             self.anim, self.anim_start, self.anim_loop = name, time.time(), loop
             self.lag = self.burst = 0
 
     def set_mode(self, mode, seconds=0.0):
-        if mode == "thinking" and self.mode != "thinking" and not self.roaming:
+        if mode != "idle":
+            self.wake_up()
+        if mode == "thinking" and self.mode != "thinking" and not self.roaming and self.anim != "desktop_wake":
             self.play_anim("eyes", loop=True)
         elif mode != "thinking" and self.anim == "eyes":
             self.anim = None
@@ -759,7 +852,7 @@ class Avatar(QWidget):
             self.hopping = False
         self.mode = mode
         self.mode_until = time.time() + seconds if seconds > 0 else 0
-        self.hide_at = time.time() + self.hide_after if mode == "idle" else 0
+        self.hide_at = max(time.time() + self.hide_after, self.dance_until + .5) if mode == "idle" and not self.sleeping else 0
         self.burst, self.burst_level = random.randint(3, 6), random.uniform(.4, .9)
 
     def set_subtitle(self, text):
@@ -774,7 +867,8 @@ class Avatar(QWidget):
 
     # ---------- анимация ----------
     def tick(self):
-        interval = 16 if not self.game_mode and (self.roaming or self.anim in ("spin", "walk")) else 33
+        interval = (166 if self.sleeping and self.mode == "idle" and self._press is None else
+                    16 if not self.game_mode and (self.roaming or self.anim in ("spin", "walk")) else 33)
         self.timer.setInterval(interval)
         self.t += 1
         self.k += interval / 33
@@ -797,6 +891,8 @@ class Avatar(QWidget):
         if self.state == "hidden":
             self.timer.stop()
             return
+        if self.anim == "desktop_dance" and now > self.dance_until:
+            self.anim = None
         if self.mode_until and now > self.mode_until:
             self.set_mode("idle")
         if self.roaming:
@@ -805,18 +901,22 @@ class Avatar(QWidget):
             self.render()
             self.update()
             return
-        elif (self.state == "visible" and self.mode == "idle" and self.anim is None and
+        elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None
+              and self.anim is None and not self.game_mode and "desktop_blink" in self.anims and now >= self.next_blink):
+            self.play_anim("desktop_blink")
+            self.next_blink = now + random.uniform(3, 7)
+        elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None and self.anim is None and
               not self.game_mode and "spin" in self.anims and now >= self.next_spin):
             self.play_anim("spin")
             self.next_spin = now + random.uniform(25, 60)
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
-              and self.mode != "thinking"):
+              and self.mode != "thinking" and not self.sleeping and "desktop_idle" not in self.anims):
             self.change_pose()
         elif self.state == "visible" and self.hide_at and now > self.hide_at:
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        smooth = self.game_mode or self.roaming or self.anim in ("spin", "walk")
+        smooth = self.game_mode or self.roaming or "desktop_idle" in self.anims or self.anim in ("spin", "walk")
         if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
@@ -827,6 +927,9 @@ class Avatar(QWidget):
         self.update()
 
     def _figure(self):
+        if self._press is not None and self._moved and "desktop_drag" in self.anims:
+            frames = self.anims["desktop_drag"]
+            return frames[int((time.time() - self._drag_started) * frames.fps) % len(frames)]
         if self.roaming and "walk" in self.anims:
             frames = self.anims["walk"]
             index = int(self.walk_time * getattr(frames, "fps", ANIM_FPS)) % len(frames)
@@ -840,6 +943,10 @@ class Avatar(QWidget):
             self.anim = None
         if self.roaming and self.roam_img is not None:
             return self.roam_img
+        if "desktop_idle" in self.anims:
+            frames = self.anims["desktop_idle"]
+            index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)
+            return frames[index]
         if self.eye_pos is None:
             return self.base
         fig = self.base.copy()
@@ -1021,6 +1128,8 @@ class Avatar(QWidget):
         label = STATUS_TEXT.get(self.mode, "")
         if self.mode == "idle":
             label = {"hurt": "ОБИЖЕНА", "happy": "ДОВОЛЬНА", "playful": "ШАЛЮ", "bored": "СКУЧАЮ"}.get(self.mood, label)
+        if self.sleeping:
+            label = "ДРЕМЛЮ"
         status = "// CAPRI :: " + label
         p.setPen({"hurt": PURPLE, "happy": GREEN, "playful": PINK, "bored": CYAN}.get(self.mood, GREEN))
         p.drawText(16, top + 20, status)
@@ -1081,21 +1190,70 @@ class Avatar(QWidget):
     # ---------- мышь: клик — позвать, тащить — переместить, ПКМ — меню ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self.wake_up()
             self.stop_roam()
-            self._press = e.globalPosition().toPoint() - self.pos()
+            self._press_origin = e.globalPosition().toPoint()
+            self._press = self._press_origin - self.pos()
+            self._pat_x, self._pat_direction, self._pat_turns = None, 0, []
+            self.hopping, self.hop_home, self.tele_target = False, None, None
+            self.hide_at = 0
             self._moved = False
         elif e.button() == Qt.MouseButton.RightButton:
             self.menu_requested.emit(e.globalPosition().toPoint())
 
+    def stroke_head(self, point, now):
+        if (self._press is not None or self.state != "visible" or self.mode != "idle" or
+                not W * .2 <= point.x() <= W * .8 or not 0 <= point.y() < FIG_H * .42):
+            self._pat_x, self._pat_direction, self._pat_turns = None, 0, []
+            return False
+        if self._pat_x is None:
+            self._pat_x = point.x()
+            return False
+        delta = point.x() - self._pat_x
+        if abs(delta) < 10:
+            return False
+        self._pat_x = point.x()
+        direction = 1 if delta > 0 else -1
+        self._pat_turns = [stamp for stamp in self._pat_turns if now - stamp < 1.4]
+        if self._pat_direction and direction != self._pat_direction:
+            self._pat_turns.append(now)
+        self._pat_direction = direction
+        if len(self._pat_turns) >= 3 and now - self._last_pat >= 6:
+            self._last_pat = now
+            self._pat_turns.clear()
+            self.wake_up()
+            self.play_anim("desktop_grin")
+            self.hide_at = now + self.hide_after
+            self.petted.emit()
+            return True
+        return False
+
     def mouseMoveEvent(self, e):
-        if self._press is not None:
-            self.move(e.globalPosition().toPoint() - self._press)
-            self.hopping, self.hop_home = False, None
-            self._moved = True
-            self.user_moved = True
+        if self._press is None:
+            self.stroke_head(e.position(), time.time())
+            return
+        cursor = e.globalPosition().toPoint()
+        if not self._moved and (cursor - self._press_origin).manhattanLength() < 6:
+            return
+        if not self._moved:
+            self._drag_started = time.time()
+            self.anim = None
+        self.move(cursor - self._press)
+        self.hopping, self.hop_home, self.tele_target = False, None, None
+        self._moved = True
+        self.user_moved = True
+        self.hide_at = 0
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if not self._moved:
+                self.hide_at = time.time() + self.hide_after if self.mode == "idle" else 0
                 self.clicked.emit()
-            self._press = None
+            else:
+                screen = QGuiApplication.screenAt(e.globalPosition().toPoint()) or QGuiApplication.primaryScreen()
+                rect = screen.availableGeometry()
+                self.move(max(rect.left(), min(self.x(), rect.right() - W + 1)),
+                          max(rect.top(), min(self.y(), rect.bottom() - H + 1)))
+                self.hide_at = time.time() + self.hide_after if self.mode == "idle" else 0
+                self.play_anim("desktop_grin")
+            self._press = self._press_origin = None

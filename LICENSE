@@ -28,3 +28,6 @@ It does NOT grant any rights to:
 - the character Capri and the Cyberpunk: Edgerunners universe, which belong to their rights holders;
 - the Vosk speech recognition model in bundled/ (vosk-model-small-ru-0.22 by Alpha Cephei),
   which is distributed under the Apache License 2.0.
+
+- imported sprite artwork in assets/desktop_sprites/, distributed under PolyForm Noncommercial 1.0.0;
+  see assets/desktop_sprites/LICENSE.md and NOTICE.md for the required attribution and terms.

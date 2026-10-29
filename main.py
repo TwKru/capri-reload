@@ -801,6 +801,11 @@ class Capri(QObject):
 
         if cancelled():
             return
+        if kind == "pet":
+            self.personality.react("ты молодец")
+            self.sync_personality()
+            self.last_activity = time.time()
+            return
         if kind == "chatter":
             text = self.chatter_line()
             if random.random() < self.cfg.get("roam_chance", 0.5):
@@ -921,8 +926,8 @@ class Capri(QObject):
             self.hop.emit()  # отвечает, скача по экрану красной молнией
         if reply.action == "wave":
             self.anim.emit("capri")
-        elif reply.action == "anim:spin":
-            self.anim.emit("spin")
+        elif reply.action and reply.action.startswith("anim:") and reply.action != "anim:sleep":
+            self.anim.emit(reply.action[5:])
         elif reply.action and reply.action.startswith("move:"):
             self.move_to.emit(reply.action[5:])
         elif reply.action == "roam":
@@ -930,6 +935,8 @@ class Capri(QObject):
         if not streamed and self.say(reply.text):
             return  # перебили — уже слушаем новую команду
 
+        if reply.action == "anim:sleep":
+            self.anim.emit("sleep")
         if reply.action == "quit":
             self.quit_app.emit()
         elif reply.action == "update":
@@ -1037,6 +1044,7 @@ def main():
     capri.hop.connect(avatar.start_hopping)
     capri.move_to.connect(avatar.move_to_named)
     avatar.clicked.connect(capri.call_from_click)
+    avatar.petted.connect(lambda: capri.jobs.put(("pet",)))
 
     def ask_text():
         text, ok = QInputDialog.getText(None, "Капри", "Команда или вопрос:")

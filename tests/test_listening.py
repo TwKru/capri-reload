@@ -140,6 +140,15 @@ class ListeningTests(unittest.TestCase):
         self.capri.on_final("первое", b"audio")
         self.assertEqual(self.capri.jobs.get_nowait()[1], "первое")
 
+    def test_nap_animation_starts_after_speech(self):
+        animations = []
+        self.capri.anim.connect(animations.append)
+        self.capri.actions.handle.return_value = Reply("Немного подремлю.", "anim:sleep")
+        self.capri.speaker.say.side_effect = lambda text: self.assertEqual(animations, [])
+        self.capri.on_final("капри поспи", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(animations, ["sleep"])
+
     def test_dismissal_waits_for_full_sentence_and_hides_without_speech(self):
         self.capri.on_partial("капри заткнись")
         self.assertGreater(self.capri.awake_until, time.time())
