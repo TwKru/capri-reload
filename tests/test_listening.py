@@ -46,27 +46,57 @@ class ListeningTests(unittest.TestCase):
         appear.assert_called_once()
         self.assertEqual(self.capri.jobs.get_nowait()[1], "поставь лайк песне")
 
-    def test_failed_local_answer_uses_web_evidence_without_opening_browser(self):
+    def test_failed_chat_answer_never_triggers_search(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("chat")
+        self.capri.actions.handle_conversation.return_value = None
         self.capri.local = Mock()
-        self.capri.local.ask.side_effect = [None, "Свет рассеивается в атмосфере."]
+        self.capri.local.ask.return_value = None
         self.capri.ai.available = False
+        self.capri.say = Mock(return_value=False)
+        for phrase in ("давай поговорим", "почему небо голубое", "расскажи анекдот"):
+            self.capri.text_command(phrase)
+            self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.web.ask.assert_not_called()
+        self.capri.actions.web.assert_not_called()
+        self.assertEqual(self.capri.router.ask.call_count, 3)
+        self.assertEqual(self.capri.local.ask.call_count, 3)
+
+    def test_router_search_preserves_whole_question_and_runs_before_answer(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("search", "Франция")
         self.capri.actions.handle.return_value = None
-        sources = [{"title": "Физика", "url": "https://example.org/sky", "text": "Рассеяние света."}]
+        self.capri.actions.execute_decision.return_value = Reply("Франция", "research")
+        self.capri.local = Mock()
+        self.capri.local.ask.return_value = "Ответ по найденным сведениям."
+        self.capri.ai.available = False
+        sources = [{"title": "Источник", "url": "https://example.org/", "text": "Проверенные сведения."}]
         self.capri.web.ask.return_value = sources
         self.capri.say = Mock(return_value=False)
-        self.capri.text_command("Почему небо голубое?")
+        self.capri.text_command("Кто сейчас президент Франции?")
         self.capri._process(self.capri.jobs.get_nowait())
-        self.capri.web.ask.assert_called_once_with("Почему небо голубое?")
-        self.assertEqual(self.capri.local.ask.call_count, 2)
-        self.assertEqual(self.capri.local.ask.call_args.kwargs["web_context"], sources)
-        self.capri.actions.web.assert_not_called()
-        self.capri.say.assert_called_once_with("Свет рассеивается в атмосфере.")
+        self.capri.web.ask.assert_called_once_with("Кто сейчас президент Франции?")
+        self.capri.local.ask.assert_called_once_with("Кто сейчас президент Франции?", web_context=sources)
+
+    def test_model_failure_does_not_read_raw_web_snippet_or_site(self):
+        self.capri.actions.handle.return_value = Reply("тема", "research")
+        self.capri.ai.available = False
+        self.capri.local = Mock()
+        self.capri.local.ask.return_value = None
+        self.capri.web.ask.return_value = [{"title": "Some Site", "url": "https://example.org/", "text": "Сырой фрагмент статьи."}]
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("найди информацию о теме")
+        self.capri._process(self.capri.jobs.get_nowait())
+        spoken = self.capri.say.call_args.args[0]
+        self.assertNotIn("example.org", spoken)
+        self.assertNotIn("Сырой фрагмент", spoken)
+        self.assertIn("не смогла", spoken)
 
     def test_search_failure_is_spoken_without_opening_a_browser(self):
         self.capri.local = Mock()
         self.capri.local.ask.return_value = None
         self.capri.ai.available = False
-        self.capri.actions.handle.return_value = None
+        self.capri.actions.handle.return_value = Reply("Какая погода сегодня?", "research")
         self.capri.say = Mock(return_value=False)
         self.capri.text_command("Какая погода сегодня?")
         self.capri._process(self.capri.jobs.get_nowait())

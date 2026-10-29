@@ -78,11 +78,3 @@ class WebSearch:
                 self.cache[query] = (time.monotonic(), sources)
             log.info("Фоновый поиск: найдено источников %d", len(sources))
         return [dict(item) for item in sources]
-
-
-def source_excerpt(sources):
-    """Запасной пересказ найденного фрагмента, когда разговорная модель недоступна."""
-    first = sources[0]
-    host = urlsplit(first["url"]).hostname
-    text = first["text"][:500]
-    return f"Вот фрагмент из найденного источника {host}: {text}"

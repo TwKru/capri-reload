@@ -19,6 +19,13 @@ class PersonalityTests(unittest.TestCase):
         self.now = 1000.0
         self.person = Personality(clock=lambda: self.now, persist=False)
 
+    def test_greeting_and_talk_are_answered_locally(self):
+        for phrase in ("привет", "давай поговорим", "поболтаем"):
+            self.assertTrue(self.person.can_handle(phrase))
+            reply = self.person.react(phrase).reply
+            self.assertTrue(reply)
+            self.assertNotIn("сайт", reply)
+
     def test_hurt_expires_and_apology_reconciles_immediately(self):
         reaction = self.person.react("Ты тупая!")
         self.assertTrue(reaction.reply)

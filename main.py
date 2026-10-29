@@ -58,7 +58,7 @@ try:
     from ai import AI
     from local_ai import LocalAI
     from intent_router import IntentRouter
-    from web_search import WebSearch, source_excerpt
+    from web_search import WebSearch
     from persona import LINES, gendered, line, set_user
     from avatar import Avatar
     import zapret
@@ -931,7 +931,8 @@ class Capri(QObject):
             # Сохраняем точные названия песен, программ и пользовательские команды.
             reply = self.actions.handle(cmd)
             if reply is None or reply.action == "unresolved":
-                routed = self.actions.execute_decision(decision, original=cmd)
+                routed = (None if decision.action == "search" and not self.cfg.get("search_when_unsure", True)
+                          else self.actions.execute_decision(decision, original=cmd))
                 if routed is not None:
                     reply = routed
         self.sync_personality()
@@ -940,6 +941,8 @@ class Capri(QObject):
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
         research_query = reply.text if reply is not None and reply.action == "research" else None
+        if research_query is not None and decision is not None and decision.action == "search":
+            research_query = cmd  # мини-модель может потерять вопрос, оставив лишь город/имя
         if research_query is not None:
             reply = None
         if reply is None:
@@ -960,7 +963,9 @@ class Capri(QObject):
                 answer = self._ask_ai(self.local, cmd, ai_cancelled, speak_sentence)
             if answer is AI_CANCELLED or ai_cancelled():
                 return
-            if not answer and not dismissal and (research_query is not None or self.cfg.get("search_when_unsure", True)):
+            # Интернет — отдельный маршрут диспетчера/явной команды, не запасной
+            # ответ на тайм-аут разговорной модели и не на её отказ ответить.
+            if not answer and not dismissal and research_query is not None:
                 self.last_web_sources = []
                 sources = self._ask_ai(self.web, research_query or cmd, ai_cancelled, lock=self.web_call_lock)
                 if sources is AI_CANCELLED or ai_cancelled():
@@ -972,9 +977,12 @@ class Capri(QObject):
                         if answer is AI_CANCELLED or ai_cancelled():
                             return
                     if not answer:
-                        answer = source_excerpt(sources)
+                        answer = "Нашла сведения, но не смогла сейчас составить ответ. Попробуй ещё раз."
                 else:
                     answer = "Не удалось получить сведения из интернета. Попробуй позже или уточни вопрос."
+            if not answer and not dismissal and (decision is not None and decision.action == "chat"
+                                                  or IntentRouter.is_basic_chat(cmd) or IntentRouter.is_question(cmd)):
+                answer = "Не смогла сейчас ответить. Попробуй ещё раз."
             reply = (Reply(answer, "answer") if answer else
                      Reply("Если хочешь, чтобы я исчезла с экрана, скажи: Капри, спрячься.", "answer")
                      if dismissal else self.actions.fallback(cmd, force_search=bool(self.local)))

@@ -73,6 +73,18 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
                 request.assert_called_once()
 
+    def test_basic_dialogue_overrides_wrong_search_decision_after_model_call(self):
+        for phrase in ("привет", "давай поговорим", "как дела", "расскажи шутку", "мне скучно"):
+            body = {"message": {"content": json.dumps(decision("search", phrase))}}
+            with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())) as request:
+                self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
+                request.assert_called_once()
+
+    def test_fresh_question_can_be_routed_to_web_by_mini_model(self):
+        body = {"message": {"content": json.dumps(decision("search", "Кто сейчас президент Франции"))}}
+        with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())):
+            self.assertEqual(IntentRouter({}).ask("Кто сейчас президент Франции?").action, "search")
+
     def test_dialogue_context_is_sent_as_data(self):
         body = {"message": {"content": json.dumps(decision("hide"))}}
         with patch("intent_router.urllib.request.urlopen",
