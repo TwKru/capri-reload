@@ -12,11 +12,15 @@ samples/
 # служебное
 __pycache__/
 .ruff_cache/
+.pytest_cache/
+.venv/
+venv/
 .capri-version
 .capri-update-backup/
 .capri-update.lock
 capri-update.log
 *.pyc
+*.pyo
 *.tmp
 
 capri-crash.log

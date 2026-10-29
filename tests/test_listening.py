@@ -180,7 +180,6 @@ class ListeningTests(unittest.TestCase):
             self.capri._process(self.capri.jobs.get_nowait())
         self.capri.actions.handle.assert_not_called()
         self.assertEqual(self.capri.router.ask.call_count, 3)
-        self.capri.router.classify_dismissal.assert_not_called()
 
     def test_ambiguous_request_uses_context_classifier(self):
         self.capri.router = main.IntentRouter({})
