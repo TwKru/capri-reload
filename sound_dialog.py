@@ -50,9 +50,14 @@ class SoundDialog(QDialog):
         cfg = capri.cfg
         self.volume = _slider(0, 100, int(cfg.get("voice_volume", 100)))
         self.fx = _slider(0, 250, int(float(cfg.get("voice_fx", 0)) * 100))
+        self.pitch = _slider(-20, 60, round(float(cfg.get("voice_shift", 3)) * 10))
+        self.pitch.setToolTip("0 — исходная высота. Больше — голос писклявее. Единица — полутон.")
+        self.glitch = _slider(0, 100, round(float(cfg.get("voice_glitch", .25)) * 100))
+        self.glitch.setToolTip("Вероятность короткого повтора в реплике. 0 — без заиканий.")
         self.gain = _slider(50, 400, int(float(cfg.get("mic_gain", 1.0)) * 100))
         self.sens = _slider(0, 100, int(cfg.get("mic_sensitivity", 100)))
         self.vol_label, self.gain_label, self.sens_label, self.fx_label = QLabel(), QLabel(), QLabel(), QLabel()
+        self.pitch_label, self.glitch_label = QLabel(), QLabel()
         self.meter = LevelMeter()
         test = QPushButton("Проверить голос")
         test.clicked.connect(lambda: capri.jobs.put(("say", "Проверка громкости. Так меня хорошо слышно?")))
@@ -63,13 +68,16 @@ class SoundDialog(QDialog):
         lay.addWidget(self._title("Голос Капри"))
         lay.addLayout(self._row("Громкость:", self.volume, self.vol_label))
         lay.addLayout(self._row("Эффекты:", self.fx, self.fx_label))
+        lay.addLayout(self._row("Высота голоса:", self.pitch, self.pitch_label))
+        lay.addLayout(self._row("Глитчи:", self.glitch, self.glitch_label))
         lay.addWidget(test, alignment=Qt.AlignmentFlag.AlignLeft)
         lay.addSpacing(10)
         lay.addWidget(self._title("Микрофон для Капри — " + (capri.current_mic() or "по умолчанию")))
         lay.addLayout(self._row("Громкость:", self.gain, self.gain_label))
         lay.addLayout(self._row("Чувствительность:", self.sens, self.sens_label))
         lay.addWidget(self.meter)
-        hint = QLabel("Эффекты: 0 — чистый синтезированный голос; больше — сильнее цифровая обработка.\n"
+        hint = QLabel("Высота — насколько голос писклявый; эффекты — цифровой хор.\n"
+                      "Глитчи — отдельные короткие заикания; 0 отключает их.\n"
                       "Нажми «Проверить голос», чтобы послушать.\n"
                       "Скажи что-нибудь: полоска должна заходить за розовую отметку и становиться зелёной.\n"
                       "Не слышит — прибавь громкость. Реагирует на шум — убавь чувствительность.\n"
@@ -84,6 +92,12 @@ class SoundDialog(QDialog):
         self.fx.valueChanged.connect(self._labels)
         self.fx.sliderReleased.connect(lambda: capri.set_voice_fx(self.fx.value() / 100))
         self.fx.valueChanged.connect(lambda v: None if self.fx.isSliderDown() else capri.set_voice_fx(v / 100))
+        self.pitch.valueChanged.connect(self._labels)
+        self.glitch.valueChanged.connect(self._labels)
+        self.pitch.sliderReleased.connect(lambda: capri.set_voice_tone(shift=self.pitch.value() / 10))
+        self.glitch.sliderReleased.connect(lambda: capri.set_voice_tone(glitch=self.glitch.value() / 100))
+        self.pitch.valueChanged.connect(lambda v: None if self.pitch.isSliderDown() else capri.set_voice_tone(shift=v / 10))
+        self.glitch.valueChanged.connect(lambda v: None if self.glitch.isSliderDown() else capri.set_voice_tone(glitch=v / 100))
         self.gain.valueChanged.connect(lambda v: self._live(gain=v / 100))
         self.sens.valueChanged.connect(lambda v: self._live(sensitivity=v))
         self.volume.sliderReleased.connect(lambda: capri.set_voice_volume(self.volume.value()))
@@ -129,6 +143,8 @@ class SoundDialog(QDialog):
         self.vol_label.setText(f"{self.volume.value()}%")
         fx = self.fx.value() / 100
         self.fx_label.setText("нет" if fx == 0 else f"×{fx:.1f}")
+        self.pitch_label.setText(f"{self.pitch.value() / 10:+.1f}")
+        self.glitch_label.setText("нет" if not self.glitch.value() else f"{self.glitch.value()}%")
         self.gain_label.setText(f"×{self.gain.value() / 100:.1f}")
         self.sens_label.setText(f"{self.sens.value()}%")
 

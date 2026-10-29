@@ -31,11 +31,11 @@ def main():
     sys.path.insert(0, BASE)
     import kokoro_voice
     try:
-        kokoro_voice.verify_pack()
+        kokoro_voice.verify_masha()
     except (OSError, ValueError):
-        print("[Capri] Устанавливаю локальный голос Capri Desktop (316 МБ)...", flush=True)
+        print("[Capri] Устанавливаю русский голос Маша (139 МБ)...", flush=True)
         try:
-            kokoro_voice.install_pack()
+            kokoro_voice.install_masha()
         except Exception as error:
             print(f"[Capri] Не удалось установить голос: {error}")
             print("[Capri] Проверь интернет и запусти setup_voice.bat ещё раз.")

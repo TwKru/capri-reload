@@ -31,3 +31,8 @@ It does NOT grant any rights to:
 
 - imported sprite artwork in assets/desktop_sprites/, distributed under PolyForm Noncommercial 1.0.0;
   see assets/desktop_sprites/LICENSE.md and NOTICE.md for the required attribution and terms.
+
+- third_party/kokoro_ru_frontend.py: Apache License 2.0, adapted from zaakirio/kokoro-ru;
+- third_party/misaki_espeak.py: Apache License 2.0, adapted from hexgrad/misaki;
+  see third_party/NOTICE.md and its license files;
+- separately downloaded Kokoro-RU model weights: OpenRAIL, see the upstream model card.

@@ -149,6 +149,17 @@ class ListeningTests(unittest.TestCase):
         self.capri._process(self.capri.jobs.get_nowait())
         self.assertEqual(animations, ["sleep"])
 
+    def test_voice_tone_settings_preserve_other_config_fields(self):
+        saved = {"mic_device": "user microphone", "user_name": "user"}
+        with patch.object(main, "_edit_config", side_effect=lambda change: change(saved)):
+            self.capri.set_voice_tone(shift=3, glitch=.25)
+        self.assertEqual(saved["voice_shift"], 3)
+        self.assertEqual(saved["voice_glitch"], .25)
+        self.assertEqual(saved["mic_device"], "user microphone")
+        self.assertEqual(saved["user_name"], "user")
+        self.assertEqual(self.capri.speaker.shift, 3)
+        self.assertEqual(self.capri.speaker.glitch, .25)
+
     def test_dismissal_waits_for_full_sentence_and_hides_without_speech(self):
         self.capri.on_partial("капри заткнись")
         self.assertGreater(self.capri.awake_until, time.time())

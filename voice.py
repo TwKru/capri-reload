@@ -413,6 +413,31 @@ def _pct(value):
     return int(m.group(1)) if m else 0
 
 
+def light_stutter(x, amount=.25, seed=None):
+    """Rare 30 ms repeats: add a short fragment without cutting any original speech."""
+    import numpy as np
+    probability = max(0.0, min(1.0, float(amount)))
+    if probability == 0 or len(x) < FX_SR * 1.2:
+        return x
+    rnd = np.random.default_rng(seed)
+    if rnd.random() >= probability:
+        return x
+    size = int(FX_SR * .030)
+    candidates = rnd.integers(len(x) // 4, len(x) * 3 // 4, size=6)
+    at = int(max(candidates, key=lambda pos: float(np.mean(x[pos:pos + size] ** 2))))
+    # Start at a zero crossing, then soften the inserted fragment's edges.
+    start = max(0, at - 80)
+    window = x[start:at + 80]
+    nearby = np.flatnonzero(window[:-1] * window[1:] <= 0) + 1
+    if len(nearby):
+        at = start + int(nearby[np.argmin(abs(nearby - (at - start)))])
+    fragment = x[at:at + size].copy() * .75
+    fade = int(FX_SR * .003)
+    fragment[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)
+    fragment[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+    return np.concatenate((x[:at + size], fragment, x[at + size:]))
+
+
 def lively_semitones(sentences, base, rnd, lively=True):
     """Сдвиг высоты каждой фразы в полутонах: общий подъём + живая интонация
     (восклицания и вопросы выше, многоточия ниже)."""
@@ -563,10 +588,12 @@ class Speaker:
         self.lively = bool(cfg.get("voice_lively", not local_profile))  # у каждой фразы своя высота
         self.shift = float(cfg.get("voice_shift", 0.0 if local_profile else 2.0))      # общий подъём тона в полутонах
         self.kokoro_speed = max(.5, min(2.0, float(cfg.get("kokoro_speed", 1.0))))
+        self.kokoro_voice = cfg.get("kokoro_voice", "capri")
+        self.glitch = max(0.0, min(1.0, float(cfg.get("voice_glitch", 0.0))))
         self.kokoro = None
         if cfg.get("tts_engine") == "kokoro":
             from kokoro_voice import KokoroClient
-            self.kokoro = KokoroClient(threads=cfg.get("kokoro_threads", 2))
+            self.kokoro = KokoroClient(threads=cfg.get("kokoro_threads", 2), variant=self.kokoro_voice)
         self.engine = cfg.get("tts_engine", "edge")          # kokoro/silero — локально, edge — онлайн
         self.silero_voice = cfg.get("silero_voice", "xenia")
         self.silero_pitch = cfg.get("silero_pitch", "high")
@@ -680,13 +707,15 @@ class Speaker:
     def render_kokoro(self, text, dst):
         if self.kokoro is None:
             from kokoro_voice import KokoroClient
-            self.kokoro = KokoroClient()
-        speed = max(.5, min(2.0, self.kokoro_speed / (2 ** (self.shift / 12))))
+            self.kokoro = KokoroClient(variant=self.kokoro_voice)
+        shift, fx, glitch = self.shift, self.fx, self.glitch
+        speed = max(.5, min(2.0, self.kokoro_speed / (2 ** (shift / 12))))
         self.kokoro.render(text, dst, cancel=self.stop_event, speed=speed)
-        if self.shift or self.fx > 0:
-            audio = pitch_shift(trim_silence(decode(dst)), self.shift)
-            if self.fx > 0:
-                audio = fx_process(audio, self.fx)
+        if shift or fx > 0 or glitch > 0:
+            audio = pitch_shift(trim_silence(decode(dst)), shift)
+            if fx > 0:
+                audio = fx_process(audio, fx)
+            audio = light_stutter(audio, glitch)
             write_wav(dst, audio)
         return dst
 
@@ -771,7 +800,8 @@ class Speaker:
     # ---------- кэш: повторяющиеся фразы («Листаю», «Открываю ютуб») звучат сразу, без сервера ----------
     def _cache_path(self, text):
         import hashlib
-        backend = (f"kokoro-capri-ru-v1:{self.kokoro_speed}" if self.engine == "kokoro" else self.engine)
+        backend = (f"kokoro-ru-v2:{self.kokoro_voice}:{self.kokoro_speed}:{self.glitch}"
+                   if self.engine == "kokoro" else self.engine)
         key = "|".join(map(str, (text, backend, self.voice, self.rate, self.pitch, self.shift, self.lively,
                                  self.fx, self.volume, self.silero_voice)))
         return os.path.join(TTS_CACHE, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".wav")

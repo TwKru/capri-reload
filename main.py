@@ -105,14 +105,16 @@ DEFAULTS = {
     "use_google_stt": True,
     "voice": "ru-RU-SvetlanaNeural",
     "tts_engine": "kokoro",
+    "kokoro_voice": "masha",
     "kokoro_speed": 1.0,
     "kokoro_threads": 2,
     "tts_timeout_seconds": 8,
     "voice_rate": "+10%",
     "voice_pitch": "+15Hz",
-    "voice_shift": 0,
+    "voice_shift": 3,
     "voice_lively": False,
-    "voice_fx": 0,
+    "voice_fx": .30,
+    "voice_glitch": .25,
     "listen_window_seconds": 8,
     "phrase_pause_seconds": 0.9,  # ожидание продолжения после короткой паузы, выделенной Vosk
     "followup_seconds": 0,
@@ -685,6 +687,18 @@ class Capri(QObject):
                 make_glitch_sound(self.glitch_wav, self.speaker.volume)
             except Exception:
                 pass
+
+    def set_voice_tone(self, shift=None, glitch=None):
+        updates = {}
+        if shift is not None:
+            self.speaker.shift = round(max(-2.0, min(6.0, float(shift))), 1)
+            updates["voice_shift"] = self.speaker.shift
+        if glitch is not None:
+            self.speaker.glitch = round(max(0.0, min(1.0, float(glitch))), 2)
+            updates["voice_glitch"] = self.speaker.glitch
+        self.cfg.update(updates)
+        if updates:
+            _edit_config(lambda data: data.update(updates))
 
     def mic_command(self, action):
         if action == "mic_info":
