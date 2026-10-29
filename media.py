@@ -181,8 +181,22 @@ def _music_button_info(button):
 
 
 def _invoke_music_button(button):
+    from comtypes import COMError
     from comtypes.gen import UIAutomationClient as UIA
-    button.GetCurrentPattern(UIA.UIA_InvokePatternId).QueryInterface(UIA.IUIAutomationInvokePattern).Invoke()
+    try:
+        invoke = button.GetCurrentPattern(UIA.UIA_InvokePatternId)
+    except COMError:
+        invoke = None
+    if invoke:
+        # Если само действие завершилось ошибкой, не пробуем второй способ:
+        # первый вызов мог успеть сработать, а повтор снял бы лайк.
+        invoke.QueryInterface(UIA.IUIAutomationInvokePattern).Invoke()
+        return
+    toggle = button.GetCurrentPattern(UIA.UIA_TogglePatternId)
+    if toggle:
+        toggle.QueryInterface(UIA.IUIAutomationTogglePattern).Toggle()
+        return
+    raise RuntimeError("Кнопка проигрывателя не поддерживает Invoke или Toggle")
 
 
 def music_page_control(action, value=None):

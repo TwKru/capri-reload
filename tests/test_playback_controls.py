@@ -133,6 +133,28 @@ class MusicPageTests(unittest.TestCase):
             self.assertEqual(self.execute("like", True, button, invoke), (True, 1))
             self.assertEqual(self.execute("like", True, button, invoke), (True, 0))
 
+    def test_chromium_like_with_null_invoke_uses_toggle_once(self):
+        from comtypes.gen import UIAutomationClient as UIA
+        button = Mock(CurrentName="Нравится", CurrentIsEnabled=True, CurrentAriaProperties="")
+        toggle = Mock(CurrentToggleState=0)
+        pattern = Mock()
+        pattern.QueryInterface.return_value = toggle
+        button.GetCurrentPattern.side_effect = lambda kind: pattern if kind == UIA.UIA_TogglePatternId else None
+        toggle.Toggle.side_effect = lambda: setattr(toggle, "CurrentToggleState", 1)
+        real_invoke = media._invoke_music_button
+        self.assertEqual(self.execute("like", True, button, real_invoke), (True, 1))
+        toggle.Toggle.assert_called_once()
+        self.assertEqual(self.execute("like", True, button, real_invoke), (True, 0))
+        toggle.Toggle.assert_called_once()
+
+    def test_invoke_error_does_not_try_toggle_after_possible_click(self):
+        from comtypes.gen import UIAutomationClient as UIA
+        button = Mock()
+        button.GetCurrentPattern.return_value.QueryInterface.return_value.Invoke.side_effect = RuntimeError("late failure")
+        with self.assertRaises(RuntimeError):
+            media._invoke_music_button(button)
+        button.GetCurrentPattern.assert_called_once_with(UIA.UIA_InvokePatternId)
+
     def test_like_reads_chromium_toggle_pattern_without_aria_properties(self):
         button = Mock(CurrentName="Нравится", CurrentIsEnabled=True, CurrentAriaProperties="")
         toggle = button.GetCurrentPattern.return_value.QueryInterface.return_value
