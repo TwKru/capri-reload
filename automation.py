@@ -1,4 +1,5 @@
 """Печать текста и цепочки действий в окнах: «открой телеграм, первый чат, напиши привет»."""
+import cancellation
 import ctypes
 import logging
 import os
@@ -38,6 +39,7 @@ KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 0x0002, 0x0004
 def type_text(text, delay=0.012):
     """Печатает любой текст (в т.ч. русский) в активное окно — независимо от раскладки клавиатуры."""
     for ch in text:
+        cancellation.checkpoint()
         if ch == "\n":
             ch = "\r"
         encoded = ch.encode("utf-16-le")
@@ -47,7 +49,7 @@ def type_text(text, delay=0.012):
             up = INPUT(type=1, u=_INPUTUNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
             arr = (INPUT * 2)(down, up)
             u.SendInput(2, arr, ctypes.sizeof(INPUT))
-        time.sleep(delay)
+        cancellation.wait(delay)
 
 
 # ---------------- окна ----------------
@@ -133,6 +135,7 @@ def is_foreground(hwnd):
 
 
 def focus(hwnd):
+    cancellation.checkpoint()
     """Сделать окно активным. Windows не даёт фоновой программе забирать фокус, поэтому по очереди:
     «пустой» Alt, присоединение к потоку активного окна, а если не вышло — свернуть и развернуть окно.
     Возвращает True, только если окно действительно стало активным."""
@@ -149,19 +152,19 @@ def focus(hwnd):
         u.SetForegroundWindow(hwnd)
         if attached:
             u.AttachThreadInput(me, fg_tid, False)
-        time.sleep(0.3)
+        cancellation.wait(0.3)
         if is_foreground(hwnd):
             return True
         if attempt == 0:  # SwitchToThisWindow — то, чем пользуется Alt+Tab; часто проходит там, где другое нет
             u.SwitchToThisWindow(hwnd, True)
-            time.sleep(0.3)
+            cancellation.wait(0.3)
             if is_foreground(hwnd):
                 return True
         if attempt == 1:  # крайний способ: развёрнутое из свёрнутого окно Windows активирует сама
             u.ShowWindow(hwnd, 6)   # SW_MINIMIZE
-            time.sleep(0.2)
+            cancellation.wait(0.2)
             u.ShowWindow(hwnd, 9)   # SW_RESTORE
-            time.sleep(0.4)
+            cancellation.wait(0.4)
             if is_foreground(hwnd):
                 return True
     log.info("Не удалось активировать окно «%s»", window_title(hwnd))
@@ -176,9 +179,9 @@ def wait_and_focus(keywords, timeout=10.0):
         if hwnd:
             if is_foreground(hwnd):  # нужное окно уже активно — ничего не переключаем
                 return hwnd
-            time.sleep(0.6)  # даём окну дорисоваться
+            cancellation.wait(0.6)  # даём окну дорисоваться
             return hwnd if focus(hwnd) else None
-        time.sleep(0.4)
+        cancellation.wait(0.4)
     return None
 
 
@@ -235,8 +238,8 @@ def scroll(notches, hwnd=None, delay=0.012):
     step = -120 if notches > 0 else 120  # WHEEL_DELTA: «минус» — вниз
     for _ in range(abs(int(notches))):
         u.mouse_event(0x0800, 0, 0, ctypes.c_uint32(step & 0xFFFFFFFF).value, 0)  # MOUSEEVENTF_WHEEL
-        time.sleep(delay)
-    time.sleep(0.05)
+        cancellation.wait(delay)
+    cancellation.wait(0.05)
     u.SetCursorPos(old.x, old.y)
     return True
 
@@ -325,7 +328,7 @@ def focus_search(title):
         return "youtube"
     if "telegram" in t:
         send_keys(["esc"])
-        time.sleep(0.15)
+        cancellation.wait(0.15)
         send_keys(["esc"])
         return "telegram"
     send_keys(["ctrl", "l"])  # адресная строка браузера = поиск
@@ -377,7 +380,7 @@ def set_clipboard(text):
     for _ in range(5):
         if u.OpenClipboard(0):
             break
-        time.sleep(0.05)
+        cancellation.wait(0.05)
     else:
         return False
     try:
@@ -401,11 +404,14 @@ def paste_text(text):
     if not set_clipboard(text):
         type_text(text, delay=0.05)
         return
-    time.sleep(0.05)
-    send_keys(["ctrl", "v"])
-    time.sleep(0.7)  # программа может обработать вставку не сразу — возвращаем буфер только после
-    if old:
-        set_clipboard(old)
+    try:
+        cancellation.wait(0.05)
+        send_keys(["ctrl", "v"])
+        cancellation.wait(0.7)
+    finally:
+        if old:
+            with cancellation.cleanup():
+                set_clipboard(old)
 
 
 def _telegram_search_field(hwnd):
@@ -438,27 +444,27 @@ def telegram_open_chat(index=None, name=None):
     field = _telegram_search_field(hwnd)
     if field is not None:
         field.SetFocus()
-        time.sleep(0.25)
+        cancellation.wait(0.25)
     else:  # запасной путь: Esc закрывает чат, курсор уходит в поиск
         send_keys(["esc"])
-        time.sleep(0.3)
+        cancellation.wait(0.3)
         send_keys(["esc"])
-        time.sleep(0.3)
+        cancellation.wait(0.3)
     send_keys(["ctrl", "a"])  # очистить то, что уже было в поиске
-    time.sleep(0.1)
+    cancellation.wait(0.1)
     if name:
         paste_text(name)
-        time.sleep(1.5)  # Telegram ищет по мере ввода
+        cancellation.wait(1.5)  # Telegram ищет по мере ввода
         send_keys(["enter"])  # первый результат
     else:
         send_keys(["backspace"])
-        time.sleep(0.3)
+        cancellation.wait(0.3)
         for _ in range(max(1, index or 1)):
             send_keys(["down"])
-            time.sleep(0.1)
+            cancellation.wait(0.1)
         send_keys(["enter"])
     for _ in range(10):
-        time.sleep(0.3)
+        cancellation.wait(0.3)
         title = window_title(hwnd).replace("‎", "").lower()
         if name and any(title.startswith(w) or f" {w}" in title for w in name.lower().split()):
             return True

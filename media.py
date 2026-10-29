@@ -1,5 +1,6 @@
 """Управление тем, что сейчас играет (музыка, YouTube в браузере, плееры) через системные
 мультимедиа-элементы Windows — те же, что у плашки громкости с названием трека."""
+import cancellation
 import asyncio
 import ctypes
 import datetime
@@ -76,6 +77,7 @@ def control(action, source=None):
             return False, None, None
         if action == "pause" and s.get_playback_info().playback_status != PLAYING:
             return False, None, None  # ничего не играет — нечего ставить на паузу
+        cancellation.checkpoint()
         f = {"pause": s.try_pause_async, "play": s.try_play_async, "toggle": s.try_toggle_play_pause_async,
              "next": s.try_skip_next_async, "prev": s.try_skip_previous_async}[action]
         ok = await f()
@@ -181,6 +183,7 @@ def _music_button_info(button):
 
 
 def _invoke_music_button(button):
+    cancellation.checkpoint()
     from comtypes import COMError
     from comtypes.gen import UIAutomationClient as UIA
     try:

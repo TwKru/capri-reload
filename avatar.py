@@ -637,7 +637,6 @@ class Avatar(QWidget):
         self.lag = 0
         self.blink = 0
         self.user_moved = False
-        self.game_mode = False
         self._press = None
         self._moved = False
 
@@ -645,17 +644,6 @@ class Avatar(QWidget):
         self.timer.timeout.connect(self.tick)
 
     # ---------- управление ----------
-    def set_game_mode(self, active):
-        self.game_mode = bool(active)
-        if self.game_mode:
-            self.overlay.timer.stop()
-            self.overlay.hide()
-            self.hopping = False
-            self.tele_target = self.hop_home = None
-            self.lag = self.burst = 0
-            if self.timer.isActive():
-                self.timer.setInterval(33)
-
     def start_roam(self):
         self.wake_up()
         """Прогулка: Капри появляется у одного края экрана и идёт вдоль панели задач к другому."""
@@ -663,7 +651,7 @@ class Avatar(QWidget):
             return
         self.anim = None
         self.lag = self.burst = 0
-        self.timer.start(33 if self.game_mode else 16)
+        self.timer.start(16)
         geo = QGuiApplication.primaryScreen().availableGeometry()
         self.home_pos = self.pos() if self.user_moved else QPoint(geo.left() + 24, geo.bottom() - H)
         self.roam_dir = random.choice((-1, 1))
@@ -690,6 +678,12 @@ class Avatar(QWidget):
         self.sleeping = False
         self.dance_until = 0.0
         self.anim = None
+        self.hopping = False
+        self.hop_home = self.tele_target = None
+        self.tele_k = 0
+        self.overlay.timer.stop()
+        self.overlay.hide()
+        self.next_spin = time.time() + 60
         self.lag = self.burst = 0
 
     def _roam_step(self, now):
@@ -710,9 +704,6 @@ class Avatar(QWidget):
 
     # ---------- телепорт молнией ----------
     def teleport(self, target):
-        if self.game_mode:
-            self.move(target)
-            return
         if self.state == "visible" and self.tele_target is None and not self.roaming:
             self.tele_target, self.tele_k = target, 0
 
@@ -740,7 +731,7 @@ class Avatar(QWidget):
 
     def start_hopping(self):
         """Пока Капри отвечает, она скачет по экрану красной молнией."""
-        if self.game_mode or self.roaming:
+        if self.roaming:
             return
         if self.hop_home is None:
             self.hop_home = self.pos()
@@ -796,26 +787,17 @@ class Avatar(QWidget):
         self.wake_up()
         self.timer.start(33)
         self.stop_roam()
-        if self.state in ("visible", "appearing"):
-            if self.game_mode:
-                self.state, self.k = "visible", 0
-                self.render()
-                self.update()
-            if not self.isVisible():
-                self.show()
-            self.raise_()
-            self.burst, self.burst_level = 6, 0.9
-            return
-        if len(self.poses) > 1:  # каждое появление — в случайной позе
-            self.change_pose(random.randrange(len(self.poses)))
-        if not self.user_moved:
-            self.move_to_named("bottom-left")  # появляемся слева снизу, над панелью задач
-        self.state, self.k = ("visible" if self.game_mode else "appearing"), 0
-        if self.game_mode:
-            self.render()
-            self.update()
-        self.next_spin = time.time() + (random.uniform(5, 9) if random.random() < .4 else random.uniform(25, 60))
+        if self.state not in ("visible", "appearing"):
+            if len(self.poses) > 1:
+                self.change_pose(random.randrange(len(self.poses)))
+            if not self.user_moved:
+                self.move_to_named("bottom-left")
+            self.next_spin = time.time() + random.uniform(25, 60)
+        self.state, self.k = "visible", 0
         self.hide_at = 0
+        self.burst, self.burst_level = 6, .9
+        self.render()
+        self.update()
         self.show()
         self.raise_()
 
@@ -874,7 +856,7 @@ class Avatar(QWidget):
     # ---------- анимация ----------
     def tick(self):
         interval = (166 if self.sleeping and self.mode == "idle" and self._press is None else
-                    16 if not self.game_mode and (self.roaming or self.anim in ("spin", "walk")) else 33)
+                    16 if self.roaming or self.anim in ("spin", "walk") else 33)
         self.timer.setInterval(interval)
         self.t += 1
         self.k += interval / 33
@@ -908,7 +890,7 @@ class Avatar(QWidget):
             self.update()
             return
         elif (self.state == "visible" and self.mode == "idle" and not self.sleeping and self._press is None and self.anim is None and
-              not self.game_mode and "spin" in self.anims and now >= self.next_spin):
+              "spin" in self.anims and now >= self.next_spin):
             self.play_anim("spin")
             self.next_spin = now + random.uniform(25, 60)
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
@@ -918,7 +900,7 @@ class Avatar(QWidget):
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        smooth = self.game_mode or self.roaming or self.roam_img is not None or self.anim in ("spin", "walk")
+        smooth = self.roaming or self.roam_img is not None or self.anim in ("spin", "walk")
         if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
@@ -950,7 +932,7 @@ class Avatar(QWidget):
             return self.roam_img
         if self.mode in ("idle", "listening") and "desktop_sleep" in self.anims:
             frames = self.anims["desktop_sleep"]
-            index = 0 if self.game_mode else int((time.time() - self.idle_started) * frames.fps) % len(frames)
+            index = int((time.time() - self.idle_started) * frames.fps) % len(frames)
             return frames[index]
         if self.eye_pos is None:
             return self.base
@@ -1003,12 +985,7 @@ class Avatar(QWidget):
         yscale = 1.0
         xscale = 1.0
 
-        if self.game_mode:
-            if self.state == "appearing":
-                p.setOpacity(min(1.0, self.k / APPEAR_FRAMES))
-            elif self.state == "vanishing":
-                p.setOpacity(max(0.0, 1 - self.k / VANISH_FRAMES))
-        elif self.tele_target is not None:
+        if self.tele_target is not None:
             # перед телепортом сжимается в узкую красную вспышку
             glitch, flash = 1.0, True
             xscale = max(0.04, 1 - self.tele_k / TELE_OUT_FRAMES)

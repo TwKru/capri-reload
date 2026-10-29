@@ -1,4 +1,5 @@
 """Текущая погода и прогноз на завтра: числовые данные вместо поисковых описаний."""
+import cancellation
 import datetime
 import json
 import logging
@@ -19,7 +20,7 @@ CONDITIONS = {0: "ясно", 1: "преимущественно ясно", 2: "�
 
 def _get(url):
     request = urllib.request.Request(url, headers={"User-Agent": "CapriReload/1.0"})
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with cancellation.open_url(request, timeout=5) as response:
         return json.loads(response.read(300000))
 
 

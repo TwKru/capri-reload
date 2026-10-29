@@ -1,4 +1,5 @@
 """Фоновый поиск: только текущий запрос, без открытия окон и передачи истории."""
+import cancellation
 import html
 import ipaddress
 import logging
@@ -49,6 +50,7 @@ class WebSearch:
                                    backend="yandex,duckduckgo,yahoo")
 
     def ask(self, question):
+        cancellation.checkpoint()
         query = _text(question, 500)
         if not query:
             return []
@@ -65,6 +67,7 @@ class WebSearch:
         except Exception as error:
             log.info("Фоновый поиск недоступен: %s", error)
             return []
+        cancellation.checkpoint()
         sources, seen = [], set()
         for row in rows[:20]:
             if not isinstance(row, dict):

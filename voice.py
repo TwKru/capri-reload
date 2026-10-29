@@ -13,6 +13,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import cancellation
 import threading
 import time
 import wave
@@ -606,7 +607,7 @@ class Speaker:
         self._edge_failures = 0
         self._recovery_lock = threading.Lock()
         self._last_render_ok = 0.0
-        self.background_paused = False
+        self.prewarm_stopped = threading.Event()
         self._render_locks_guard = threading.Lock()
         self._render_locks = weakref.WeakValueDictionary()
         if self.engine == "silero":  # прогреваем модель заранее, чтобы первая фраза не тормозила
@@ -621,6 +622,7 @@ class Speaker:
     def stop(self):
         """Перебить: можно вызывать из любого потока."""
         self.stop_event.set()
+        self.prewarm_stopped.set()
 
     def _render_ok(self, text):
         self._last_render_ok = time.monotonic()
@@ -630,7 +632,9 @@ class Speaker:
 
     def say(self, text):
         """Блокирует поток до конца фразы. Возвращает True, если речь перебили."""
+        cancellation.checkpoint()
         self.stop_event.clear()
+        cancellation.checkpoint()
         text = clean_for_speech(text)
         if not text:
             return False
@@ -680,7 +684,7 @@ class Speaker:
 
     def prepare(self, text, force=False):
         """Подготовить короткую следующую фразу в фоне, не включая звук."""
-        if self.background_paused:
+        if self.stop_event.is_set():
             return False
         text = clean_for_speech(text)
         if not text or len(text) > CACHE_MAX_TEXT:
@@ -772,8 +776,19 @@ class Speaker:
                                     "NoAudioReceived", "ClientConnectionError", "ServerDisconnectedError", "ClientConnectorError"}:
                                 raise
                             await asyncio.sleep(0.15)
-            await asyncio.wait_for(asyncio.gather(*(synthesize(s, r, f)
-                for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout)
+            task = asyncio.ensure_future(asyncio.wait_for(asyncio.gather(*(synthesize(s, r, f)
+                for s, r, f in zip(sentences, rates, parts))), timeout=self.tts_timeout))
+            try:
+                while not task.done():
+                    cancellation.checkpoint()
+                    if self.stop_event.is_set():
+                        raise cancellation.RequestCancelled()
+                    await asyncio.sleep(.05)
+                await task
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         asyncio.run(go())
         try:
             import numpy as np
@@ -849,8 +864,9 @@ class Speaker:
     def prewarm(self, phrases):
         """Заранее озвучить постоянные фразы в фоне, по одной — чтобы потом они звучали сразу."""
         for text in phrases:
-            while self.background_paused:
-                time.sleep(2)
+            if self.prewarm_stopped.is_set():
+                return
+            cancellation.checkpoint()
             text = clean_for_speech(text)
             if not text or os.path.isfile(self._cache_path(text)):
                 continue
@@ -922,5 +938,13 @@ def play_sound_async(path):
     try:
         import winsound
         winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except Exception:
+        pass
+
+
+def stop_sound():
+    try:
+        import winsound
+        winsound.PlaySound(None, 0)
     except Exception:
         pass

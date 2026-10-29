@@ -1,4 +1,5 @@
 """Ответы на вопросы через локальную нейросеть (Ollama) — без ключа и интернета."""
+import cancellation
 import datetime
 import json
 import logging
@@ -6,7 +7,6 @@ import os
 import random
 import re
 import subprocess
-import time
 import urllib.request
 
 from persona import SPEECH_RULES, user_context
@@ -173,7 +173,7 @@ def strip_reasoning(text):
 def _post(path, payload, timeout):
     req = urllib.request.Request(URL + path, data=json.dumps(payload).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with cancellation.open_url(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -215,7 +215,6 @@ class LocalAI:
         self.timeout = max(1.0, float(cfg.get("local_timeout_seconds", 15)))
         self.router_model = cfg.get("router_model", "qwen3:0.6b")
         self.history = []
-        self.game_mode = False
         self.personality = None
         self.on_model_change = None  # main записывает новую модель в config.json
 
@@ -223,7 +222,7 @@ class LocalAI:
     def installed():
         """Названия скачанных моделей или None, если Ollama не отвечает."""
         try:
-            with urllib.request.urlopen(URL + "/api/tags", timeout=1.5) as r:
+            with cancellation.open_url(URL + "/api/tags", timeout=1.5) as r:
                 return [m["name"] for m in json.loads(r.read().decode("utf-8")).get("models", [])]
         except Exception:
             return None
@@ -238,13 +237,14 @@ class LocalAI:
         if names is None:
             exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
             try:
+                cancellation.checkpoint()
                 subprocess.Popen([exe if os.path.exists(exe) else "ollama", "serve"],
                                  creationflags=NO_WINDOW)
             except OSError:
                 log.info("Ollama не установлена")
                 return
             for _ in range(20):  # сервер поднимается пару секунд
-                time.sleep(0.5)
+                cancellation.wait(0.5)
                 names = self.installed()
                 if names is not None:
                     break
@@ -261,9 +261,6 @@ class LocalAI:
             if self.on_model_change:
                 self.on_model_change(other)
         try:
-            if self.game_mode:
-                log.info("Игровой режим: прогрев большой модели пропущен")
-                return
             _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": self.keep_alive}, 120)
             log.info("Локальная модель %s загружена", self.model)
         except Exception as e:
@@ -279,8 +276,6 @@ class LocalAI:
     def _options(self, max_tokens):
         options = {"num_predict": min(max_tokens, getattr(self, "max_answer_tokens", 384)), "temperature": 0.3, "repeat_penalty": 1.0,
                    "top_p": 0.9, "num_ctx": 4096}
-        if self.game_mode:
-            options.update(num_gpu=0, num_thread=2)
         return options
 
     def _chat(self, messages, max_tokens=384):
@@ -313,8 +308,9 @@ class LocalAI:
         req = urllib.request.Request(URL + "/api/chat", data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
         raw, emitted, truncated = "", 0, False
-        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+        with cancellation.open_url(req, timeout=self.timeout) as response:
             for line in response:
+                cancellation.checkpoint()
                 if not line.strip():
                     continue
                 chunk = json.loads(line)

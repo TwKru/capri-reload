@@ -89,8 +89,7 @@ class DesktopInteractionTests(unittest.TestCase):
         with patch("avatar.time.time", return_value=100):
             self.assertEqual(self.view._figure(), self.view.base)
 
-    def test_game_mode_keeps_idle_static_and_allows_explicit_dance(self):
-        self.view.set_game_mode(True)
+    def test_reclining_pose_allows_explicit_dance(self):
         first = self.view._figure()
         with patch("avatar.time.time", return_value=avatar.time.time() + 3):
             self.assertEqual(self.view._figure(), first)

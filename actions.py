@@ -1,4 +1,5 @@
 """Команды: сайты, приложения, громкость, яркость, диагностика ПК и т.д."""
+import cancellation
 import ctypes
 import datetime
 import difflib
@@ -27,6 +28,16 @@ from persona import line
 
 log = logging.getLogger("capri")
 NO_WINDOW = 0x08000000
+
+
+def start_file(path):
+    cancellation.checkpoint()
+    return os.startfile(path)
+
+
+def start_process(*args, **kwargs):
+    cancellation.checkpoint()
+    return subprocess.Popen(*args, **kwargs)
 
 
 @dataclass
@@ -396,11 +407,12 @@ class AppIndex:
     def launch(target):
         kind, value = target
         if kind == "appid":
-            subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{value}"], creationflags=NO_WINDOW)
+            start_process(["explorer.exe", f"shell:AppsFolder\\{value}"], creationflags=NO_WINDOW)
             return
-        os.startfile(value)
+        start_file(value)
 
     def launch_best(self, query, options):
+        cancellation.checkpoint()
         """Запустить лучший вариант; если Windows его не открыла (например, Roblox.lnk — «операция
         отменена»), пробуем похожие ярлыки с тем же началом (Roblox Player), а в конце — через проводник,
         как при двойном клике. options: [(оценка, имя, цель)]. Возвращает имя запущенного или None."""
@@ -416,7 +428,7 @@ class AppIndex:
             except OSError as e:
                 log.info("%s не запустился (%s)", name, e)
         if first[2][0] == "file":
-            subprocess.Popen(["explorer.exe", first[2][1]], creationflags=NO_WINDOW)
+            start_process(["explorer.exe", first[2][1]], creationflags=NO_WINDOW)
             return first[1]
         return None
 
@@ -426,6 +438,7 @@ class AppIndex:
 def _dir_size(path, limit=200000):
     total, n = 0, 0
     for root, _, files in os.walk(path):
+        cancellation.checkpoint()
         for f in files:
             try:
                 total += os.path.getsize(os.path.join(root, f))
@@ -613,7 +626,7 @@ def ensure_playing(wait_load=7.0):
         if browser_playing():
             log.info("Видео играет само")
             return
-        time.sleep(0.5)
+        cancellation.wait(0.5)
     if _ensure_token[0] != token:
         return
     hwnd = None
@@ -621,7 +634,7 @@ def ensure_playing(wait_load=7.0):
         hwnd = youtube_window()
         if hwnd:
             break
-        time.sleep(0.5)
+        cancellation.wait(0.5)
     if not hwnd:
         log.info("Окно YouTube не найдено, не нажимаю пуск")
         return
@@ -629,7 +642,7 @@ def ensure_playing(wait_load=7.0):
     u.keybd_event(0x12, 0, 0, 0)       # «пустой» Alt — без него Windows не даёт сменить активное окно
     u.keybd_event(0x12, 0, 2, 0)
     u.SetForegroundWindow(hwnd)
-    time.sleep(0.4)
+    cancellation.wait(0.4)
 
     # Клик мышью по плееру — настоящее действие пользователя: и окно активирует, и фокус ставит в плеер,
     # и браузер считает это разрешением на звук. Точка (30% ширины, 35% высоты) попадает в плеер
@@ -643,16 +656,16 @@ def ensure_playing(wait_load=7.0):
     u.SetCursorPos(x, y)
     u.mouse_event(0x0002, 0, 0, 0, 0)  # левая кнопка вниз
     u.mouse_event(0x0004, 0, 0, 0, 0)  # вверх
-    time.sleep(0.05)
+    cancellation.wait(0.05)
     u.SetCursorPos(old.x, old.y)
     for _ in range(6):
-        time.sleep(0.5)
+        cancellation.wait(0.5)
         if browser_playing():
             log.info("Видео запущено кликом по плееру")
             return
     send_keys(["k"])  # запасной вариант: фокус уже в плеере
     for _ in range(6):
-        time.sleep(0.5)
+        cancellation.wait(0.5)
         if browser_playing():
             log.info("Видео запущено клавишей K")
             return
@@ -666,7 +679,7 @@ def youtube_first(query):
                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9"})
     try:
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with cancellation.open_url(req, timeout=8) as r:
             page = r.read().decode("utf-8", "replace")
     except Exception as e:
         log.info("Поиск на YouTube не удался: %s", e)
@@ -737,10 +750,10 @@ def youtube_search_in_tab(text):
         # адрес вводится, только если адресная строка действительно получила фокус (иначе буквы ушли бы
         # в страницу YouTube, где это горячие клавиши)
         if not media.navigate(hwnd, url):
-            time.sleep(0.6)
+            cancellation.wait(0.6)
             continue
         for _ in range(10):  # ждём, что вкладка ушла на страницу результатов
-            time.sleep(0.4)
+            cancellation.wait(0.4)
             title = automation.window_title(hwnd)
             if title != before and "youtube" in title.lower() and title.lower().startswith(text.lower()[:4]):
                 return True
@@ -812,6 +825,7 @@ def search_folder(name, limit=40000):
     for root in dict.fromkeys(roots):
         base_depth = root.rstrip("\\").count("\\")
         for cur, dirs, _ in os.walk(root):
+            cancellation.checkpoint()
             dirs[:] = [d for d in dirs if not d.startswith((".", "$")) and d.lower() not in
                        ("appdata", "node_modules", "__pycache__", "site-packages", "windows")]
             if cur.count("\\") - base_depth >= 4:
@@ -936,12 +950,17 @@ def send_keys(keys):
         else:
             code = ord(k.upper())
         codes.append((code, 1 if k in EXTENDED else 0))
-    for code, ext in codes:
-        u.keybd_event(code, 0, ext, 0)
-        time.sleep(0.02)
-    for code, ext in reversed(codes):
-        u.keybd_event(code, 0, ext | 2, 0)  # 2 = KEYEVENTF_KEYUP
-        time.sleep(0.02)
+    pressed = []
+    try:
+        for code, ext in codes:
+            cancellation.checkpoint()
+            u.keybd_event(code, 0, ext, 0)
+            pressed.append((code, ext))
+            cancellation.wait(0.02)
+    finally:
+        for code, ext in reversed(pressed):
+            u.keybd_event(code, 0, ext | 2, 0)
+    cancellation.checkpoint()
 
 
 # ---------------- обработчик команд ----------------
@@ -1170,6 +1189,7 @@ class Actions:
         return bool(m and m.group(1) in self.sites)
 
     def execute_decision(self, decision, original=None):
+        cancellation.checkpoint()
         """Только перечисленные действия. Названия и поисковый текст не разбираются как цепочки команд."""
         if decision.action == "chat":
             return None
@@ -1231,6 +1251,7 @@ class Actions:
         return None
 
     def handle(self, cmd):
+        cancellation.checkpoint()
         c = norm(cmd)
         cancel_ensure()  # новая команда — старая проверка «заиграло ли видео» больше не нужна
         if self.pending:
@@ -1296,6 +1317,7 @@ class Actions:
         return best_i if best >= 0.6 else None
 
     def web(self, url):
+        cancellation.checkpoint()
         """Открыть адрес: в браузере из команды («… в хроме»), из настройки "browser" или в браузере
         по умолчанию Windows."""
         parts = urllib.parse.urlsplit(url)
@@ -1304,11 +1326,12 @@ class Actions:
             raise ValueError("Разрешены только обычные адреса сайтов http/https")
         exe = find_browser(self.browser_once) or find_browser(self.cfg.get("browser"))
         if exe:
-            subprocess.Popen([exe, url])
+            start_process([exe, url])
         else:
             webbrowser.open(url)
 
     def handle_one(self, c):
+        cancellation.checkpoint()
         # В командах звука браузер — цель изменения громкости, а не способ открыть ссылку.
         m = None if re.search(VOLUME_RE, c) else BROWSER_SUFFIX.search(c)
         self.browser_once, missing = None, None
@@ -1530,6 +1553,7 @@ class Actions:
         return bool(ev and not ev.is_set())
 
     def stop_background(self):
+        cancel_ensure()
         """Остановить фоновые действия (автопрокрутку). Вызывается и на «стоп» из main."""
         ev = getattr(self, "_autoscroll_stop", None)
         if ev and not ev.is_set():
@@ -1545,17 +1569,17 @@ class Actions:
             return False
         for keys in keys_list:
             send_keys(keys)
-            time.sleep(0.12)
+            cancellation.wait(0.12)
         return True
 
     def media_pause(self, c, m):
         if browser_playing() and automation.find_window(("youtube",)):
             # YouTube в браузере: системная пауза не всегда доходит — проверяем по звуку и жмём K
             media.control("pause")
-            time.sleep(0.8)
+            cancellation.wait(0.8)
             if browser_playing():
                 self._youtube_keys([["k"]])
-                time.sleep(0.8)
+                cancellation.wait(0.8)
             if not browser_playing():
                 self.media_paused = "youtube"
                 return Reply(line("media_paused"))
@@ -1595,7 +1619,7 @@ class Actions:
         ok = self._skip_song("next")
         if not ok:
             return Reply(line("media_none"))
-        time.sleep(0.8)  # даём плееру переключиться, чтобы назвать новый трек
+        cancellation.wait(0.8)  # даём плееру переключиться, чтобы назвать новый трек
         try:
             info = media.now_playing()
         except Exception:
@@ -1709,7 +1733,7 @@ class Actions:
             send = self.cfg.get("type_press_enter", True)
         automation.input_text(text)
         if send:
-            time.sleep(0.1)
+            cancellation.wait(0.1)
             send_keys(["enter"])
         return Reply(line("sent" if send else "typed", t=text))
 
@@ -1742,6 +1766,7 @@ class Actions:
         said = []
         in_search = False  # курсор уже стоит в поле поиска
         for step in steps:
+            cancellation.checkpoint()
             s = norm(step)
             typed = automation.parse_type(s)
             if typed:
@@ -1757,10 +1782,10 @@ class Actions:
                     # на сайте «напиши X» = поиск X: сначала курсор в строку поиска, потом Enter
                     if not in_search:
                         automation.focus_search(automation.foreground_title())
-                        time.sleep(0.4)
+                        cancellation.wait(0.4)
                     automation.input_text(text)
                     if send is not False:
-                        time.sleep(0.1)
+                        cancellation.wait(0.1)
                         send_keys(["enter"])
                     said.append(line("web", q=text))
                     continue
@@ -1768,7 +1793,7 @@ class Actions:
                     send = self.cfg.get("type_press_enter", True)
                 automation.input_text(text)
                 if send:
-                    time.sleep(0.1)
+                    cancellation.wait(0.1)
                     send_keys(["enter"])
                 said.append(line("sent" if send else "typed", t=text))
                 continue
@@ -1787,7 +1812,7 @@ class Actions:
                 if context and not automation.wait_and_focus(context, timeout=6):
                     return Reply(" ".join(said + [line("focus_fail")]))
                 automation.focus_search(automation.foreground_title())
-                time.sleep(0.3)
+                cancellation.wait(0.3)
                 in_search = True
                 continue
             r = self.handle_one(s)
@@ -1806,7 +1831,7 @@ class Actions:
                 context, kind = ("telegram",), "telegram"
             if context and re.match(r"^(открой|запусти|зайди|перейди)\b", s):
                 automation.wait_and_focus(context, timeout=10)
-                time.sleep(2.5 if kind in ("youtube", "browser") else 0.4)  # сайту нужно загрузиться
+                cancellation.wait(2.5 if kind in ("youtube", "browser") else 0.4)  # сайту нужно загрузиться
                 in_search = False
         return Reply(" ".join(said) if said else line("done"))
 
@@ -1830,7 +1855,7 @@ class Actions:
         flag = "/r" if restart else "/s"
 
         def do():
-            subprocess.Popen(["shutdown", flag, "/t", "10"], creationflags=NO_WINDOW)
+            start_process(["shutdown", flag, "/t", "10"], creationflags=NO_WINDOW)
             return Reply(line("power_do", what_noun="перезагрузка" if restart else "выключение"))
         self.pending = do
         verb = "перезагрузить" if restart else "выключить"
@@ -2109,7 +2134,7 @@ class Actions:
         path = os.path.join(folder, f"report_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(report)
-        os.startfile(path)
+        start_file(path)
         use_ai = self.cfg.get("enable_ai") and self.ai and self.ai.available
         spoken = self.ai.summarize_report(report) if use_ai else None
         if not spoken and self.local:
@@ -2148,7 +2173,7 @@ class Actions:
             explicit = re.match(r"^(папк\w*|каталог\w*|директори\w*)\s+(?P<n>.+)$", t)
             found = find_folder(explicit.group("n") if explicit else t, search=bool(explicit))
             if found:
-                os.startfile(found[0])
+                start_file(found[0])
                 return Reply(line("folder_open", t=found[1]))
             if explicit:
                 return Reply(line("folder_missing", t=explicit.group("n")))
@@ -2287,6 +2312,7 @@ class Actions:
         alive = []
         for p in procs:
             try:
+                cancellation.checkpoint()
                 p.kill() if force else p.terminate()
                 alive.append(p)
             except psutil.NoSuchProcess:
@@ -2297,6 +2323,7 @@ class Actions:
         if still:
             for p in still:
                 try:
+                    cancellation.checkpoint()
                     p.kill()
                 except Exception:
                     pass
@@ -2313,7 +2340,7 @@ class Actions:
                 p.cpu_percent(None)
             except Exception:
                 pass
-        time.sleep(1.0)
+        cancellation.wait(1.0)
         cpu, mem = {}, {}
         for p in procs:
             try:
@@ -2419,7 +2446,7 @@ class Actions:
         n = max(1, min(20, parse_number(c) or 1))
         for _ in range(n):
             send_keys(["ctrl", "w"])
-            time.sleep(0.12)
+            cancellation.wait(0.12)
         return Reply(line("tab_closed", n=n) if n > 1 else line("tab_closed_one"))
 
     def minimize_all(self, c, m):
@@ -2447,7 +2474,7 @@ class Actions:
             return None
         for _ in range(times):
             send_keys(keys)
-            time.sleep(0.08)
+            cancellation.wait(0.08)
         return Reply(line("pressed", t=" + ".join(k.upper() if len(k) == 1 else k.capitalize() for k in keys)))
 
     def time(self, c, m):
@@ -2469,11 +2496,12 @@ class Actions:
         return Reply(line("screenshot"))
 
     def _run(self, target):
+        cancellation.checkpoint()
         if target.startswith(("http://", "https://")):
             self.web(target)
             return
         try:
-            os.startfile(target)
+            start_file(target)
         except OSError:
             # Windows разбирает командную строку напрямую; &, |, > и $() не исполняются оболочкой.
-            subprocess.Popen(target, shell=False, creationflags=NO_WINDOW)
+            start_process(target, shell=False, creationflags=NO_WINDOW)

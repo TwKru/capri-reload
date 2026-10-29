@@ -13,7 +13,9 @@ import threading
 import time
 import updater
 from dismissal import CANDIDATE as DISMISS_RE, dismissal_hint
-from game_mode import fullscreen_app_active
+import cancellation
+import weakref
+from types import SimpleNamespace
 from personality import Personality
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +66,7 @@ try:
     from avatar import Avatar
     import zapret
     from voice import (Listener, Speaker, default_input_name, google_stt, input_devices, make_glitch_sound,
-                       play_sound_async)
+                       play_sound_async, stop_sound)
 except ImportError as e:
     log.exception("Не хватает библиотек")
     fatal(f"Не установлены нужные библиотеки ({e.name or e}).\n\n"
@@ -82,7 +84,6 @@ DEFAULTS = {
     "router_timeout_seconds": 4.0,
     "router_num_gpu": 0,
     "web_app_lookup": True,
-    "auto_game_mode": True,
     "personality": True,
     "barge_in": True,
     "mic_device": None,
@@ -294,7 +295,10 @@ class Capri(QObject):
         self.zapret_checked = False  # предлагали ли уже исправить zapret в этом сеансе
         self.actions.local = self.local
         self.speaker = Speaker(cfg)
-        self.jobs = queue.Queue()
+        self.cancel_epoch = 0
+        self.cancel_lock = threading.Lock()
+        self.cancel_scopes = weakref.WeakSet()
+        self.jobs = cancellation.JobQueue(lambda: self.cancel_epoch)
         self.awake_until = 0.0
         self.answer_until = 0.0
         self.voice_generation = 0  # «стоп» отменяет голосовые задания, которые ещё обрабатываются
@@ -303,9 +307,6 @@ class Capri(QObject):
         self.router_call_lock = threading.Lock()
         self.web_call_lock = threading.Lock()
         self.update_process = None
-        self.game_active = False
-        self._game_memory_released = False
-        self._game_release_retry_at = 0.0
         self.last_partial_wake = 0.0
         self.speaking = False
         self.interrupted = False
@@ -326,9 +327,9 @@ class Capri(QObject):
             def start_local():
                 with self.ai_call_lock:
                     self.local.start_server()
-            threading.Thread(target=start_local, daemon=True).start()
+            self._background(start_local)
         if self.router:
-            threading.Thread(target=self.router.warmup, daemon=True).start()
+            self._background(self.router.warmup)
         model =os.path.join(BASE, self.cfg["vosk_model"])
         if os.path.isdir(model):
             self.listener = Listener(model, self.on_final, self.on_partial, self.on_listener_error,
@@ -345,39 +346,29 @@ class Capri(QObject):
         if CONFIG_ERROR:
             self.jobs.put(("say", CONFIG_ERROR))
         threading.Thread(target=self._chatter_loop, daemon=True).start()  # сам проверяет, включено ли
-        threading.Thread(target=self._prewarm_voice, daemon=True).start()
+        self._background(self._prewarm_voice)
 
-    def set_game_mode(self, active):
-        active = bool(active)
-        if active != self.game_active:
-            log.info("Игровой режим: %s", "включён" if active else "выключен")
-        self.game_active = active
-        self.speaker.background_paused = active
-        if self.local:
-            self.local.game_mode = active
-        if not active:
-            self._game_memory_released = False
-            return
-        if (not self.local or self._game_memory_released or
-                time.monotonic() < self._game_release_retry_at or not self.ai_call_lock.acquire(blocking=False)):
-            return
-        self._game_release_retry_at = time.monotonic() + 15
-        def release():
+    def _scope(self, predicate):
+        scope = cancellation.Scope(predicate)
+        with self.cancel_lock:
+            self.cancel_scopes.add(scope)
+        return scope
+
+    def _background(self, function):
+        epoch = self.cancel_epoch
+        scope = self._scope(lambda: epoch != self.cancel_epoch)
+        def run():
             try:
-                if self.game_active:
-                    self.local.release_memory()
-                    self._game_memory_released = True
-                    log.info("Игровой режим: память большой модели освобождена")
-            except Exception as error:
-                log.info("Не удалось освободить память модели: %s", error)
-            finally:
-                self.ai_call_lock.release()
-        threading.Thread(target=release, daemon=True).start()
+                with scope.bind():
+                    function()
+            except cancellation.RequestCancelled:
+                pass
+        threading.Thread(target=run, daemon=True).start()
 
     def _prewarm_voice(self):
         """Через полминуты после запуска озвучиваем в фоне постоянные фразы и свои ответы — потом они
         звучат сразу, без повторного синтеза."""
-        time.sleep(30)
+        cancellation.wait(30)
         static = [gendered(t) for variants in LINES.values() for t in variants[:1] if "{" not in t]
         priority = [gendered(text) for key in ("media_paused", "media_play", "done", "mute", "unmute", "like")
                     for text in LINES[key][:2]]
@@ -412,7 +403,7 @@ class Capri(QObject):
             if now < due:
                 continue
             quiet = now - self.last_activity > 120 and self.jobs.empty() and not self.speaking
-            if quiet and not fullscreen_app_active():
+            if quiet:
                 self.jobs.put(("chatter",))
                 due = now + next_delay()
             else:
@@ -482,16 +473,26 @@ class Capri(QObject):
         log.info("Капри перебили")
 
     def is_stop_command(self, text):
-        cmd = self.strip_wake(text).strip()
-        return bool(re.fullmatch(r"(?:стоп|хватит|достаточно|подожди|остановись|перестань)[\s,.!?]*", cmd))
+        cmd = re.sub(r"[^\w\s]", " ", self.strip_wake(text).lower()).strip()
+        return bool(re.fullmatch(r"(?:(?:ну|все|всё|эй|пожалуйста)\s+)*(?:стоп|stop|хватит|достаточно|подожди|остановись|перестань)"
+                                 r"(?:\s+(?:стоп|stop|пожалуйста|все|всё))*", cmd))
 
     def stop_listening(self):
         """Вернуться к ожиданию имени и отменить ещё не выполненные голосовые задания."""
         self.voice_generation += 1
+        self.command_serial += 1
+        self.cancel_epoch += 1
+        self.jobs.discard_before(self.cancel_epoch)
+        with self.cancel_lock:
+            scopes = list(self.cancel_scopes)
+        for scope in scopes:
+            scope.cancel()
+        self.last_activity = time.time()
         self.awake_until = 0.0
         self.answer_until = 0.0
         self.interrupted = True
         self.speaker.stop()
+        stop_sound()
         self.actions.stop_background()
         self.actions.pending = None
         self.actions.choice = None
@@ -528,6 +529,9 @@ class Capri(QObject):
             self.mode.emit("idle", 0.0)
 
     def on_partial(self, text):
+        if self.is_stop_command(text):
+            self.stop_listening()
+            return
         now = time.time()
         self.expire_answer(now)
         echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
@@ -560,6 +564,9 @@ class Capri(QObject):
             return
 
     def on_final(self, text, audio):
+        if self.is_stop_command(text):
+            self.stop_listening()
+            return
         now = time.time()
         self.expire_answer(now)
         echo = (self.speaking or now - self.speech_end < 1.0) and self.is_echo(text)
@@ -731,6 +738,9 @@ class Capri(QObject):
         self.subtitle.emit(line("listen"))
 
     def text_command(self, text):
+        if self.is_stop_command(text):
+            self.stop_listening()
+            return
         self.expire_answer()
         self.answer_until = self.awake_until = 0.0
         self.command_serial += 1
@@ -748,10 +758,14 @@ class Capri(QObject):
             job = self.jobs.get()
             try:
                 self._process(job)
+            except cancellation.RequestCancelled:
+                log.info("Задание отменено: стоп")
             except Exception:
                 log.exception("Ошибка обработки %s", job[0])
                 if job[0] != "voice" or job[4] == self.voice_generation:
                     self.say(line("crash"))
+            finally:
+                self.jobs.task_done()
 
     def _ask_ai(self, ai, question, cancelled, on_sentence=None, lock=None, method="ask", context=None, evidence=None, answer_tokens=None):
         """Ожидать ИИ, пока не поступит новая команда. Сеть не блокирует управление ПК."""
@@ -804,9 +818,19 @@ class Capri(QObject):
                 call_lock.release()
                 ready.set()
 
-        threading.Thread(target=ask, daemon=True).start()
+        scope = self._scope(cancelled)
+        def scoped_ask():
+            try:
+                with scope.bind():
+                    ask()
+            except cancellation.RequestCancelled:
+                if not ready.is_set():
+                    call_lock.release()
+                    ready.set()
+        threading.Thread(target=scoped_ask, daemon=True).start()
         while True:
             if cancelled():
+                scope.cancel()
                 log.info("Ожидание ИИ отменено: новая команда или стоп")
                 return AI_CANCELLED
             try:
@@ -818,6 +842,7 @@ class Capri(QObject):
             if cancelled():
                 return AI_CANCELLED
             if on_sentence and on_sentence(text):
+                scope.cancel()
                 return AI_CANCELLED
         if cancelled():
             return AI_CANCELLED
@@ -826,13 +851,23 @@ class Capri(QObject):
         return result[0]
 
     def _process(self, job):
+        epoch = getattr(job, "epoch", self.cancel_epoch)
+        scope = self._scope(lambda: epoch != self.cancel_epoch)
+        try:
+            with scope.bind():
+                self._process_job(job)
+        except cancellation.RequestCancelled:
+            log.info("Задание отменено: стоп")
+
+    def _process_job(self, job):
         kind = job[0]
         streamed = False
         generation = job[4] if kind == "voice" else None
         serial = self.command_serial
 
         def cancelled():
-            return generation is not None and generation != self.voice_generation
+            return (getattr(job, "epoch", self.cancel_epoch) != self.cancel_epoch or
+                    generation is not None and generation != self.voice_generation)
 
         if cancelled():
             return
@@ -845,7 +880,7 @@ class Capri(QObject):
             text = self.chatter_line()
             if random.random() < self.cfg.get("roam_chance", 0.5):
                 self.roam.emit()          # гуляет по экрану, окно с текстом сверху
-                time.sleep(1.5)
+                cancellation.wait(1.5)
             else:
                 self.summon.emit()
             if not self.say(text):
@@ -871,7 +906,10 @@ class Capri(QObject):
             selection = callable(self.actions.pending) or bool(self.actions.choice)
             if (self.cfg.get("use_google_stt") and not selection and not DISMISS_RE.search(cmd)
                     and not self.actions.is_fast_command(cmd)):
-                better = google_stt(audio)
+                better = self._ask_ai(SimpleNamespace(ask=google_stt), audio,
+                                      lambda: cancelled() or serial != self.command_serial, lock=threading.Lock())
+                if better is AI_CANCELLED or cancelled():
+                    return
                 if better:
                     better = better.lower()
                     if len(better) >= 2:
@@ -1041,6 +1079,7 @@ class Capri(QObject):
 
     def say(self, text):
         """Озвучивает текст. Возвращает True, если Капри перебили."""
+        cancellation.checkpoint()
         log.info("Капри: %s", text)
         self.subtitle.emit(text)
         self.mode.emit("speaking", 0.0)
@@ -1114,17 +1153,11 @@ def main():
     apply_user(cfg)
     capri = Capri(cfg)
     capri.mood_changed.connect(avatar.set_mood)
-    def refresh_game_mode():
-        capri.expire_answer()
-        capri.sync_personality()
-        active = bool(capri.cfg.get("auto_game_mode", True) and fullscreen_app_active())
-        avatar.set_game_mode(active)
-        capri.set_game_mode(active)
-    game_timer = QTimer(app)
-    game_timer.setInterval(2000)
-    game_timer.timeout.connect(refresh_game_mode)
-    refresh_game_mode()
-    game_timer.start()
+    maintenance_timer = QTimer(app)
+    maintenance_timer.setInterval(1000)
+    maintenance_timer.timeout.connect(capri.expire_answer)
+    maintenance_timer.timeout.connect(capri.sync_personality)
+    maintenance_timer.start()
     capri.summon.connect(avatar.summon)
     capri.vanish.connect(avatar.vanish)
     capri.mode.connect(avatar.set_mode)
@@ -1188,7 +1221,6 @@ def main():
                       ("Спрятать", avatar.vanish),
                       ("MIC", None),
                       ("SEARCH", None),
-                      ("GAME", None),
                       ("Открыть config.json", lambda: os.startfile(CONFIG_PATH)),
                       ("Проверить обновления Capri Reload", lambda: capri.text_command("проверь обновления")),
                       ("Обновить Capri Reload", lambda: capri.text_command("обновись")),
@@ -1197,17 +1229,6 @@ def main():
                       ("Выход", app.quit)):
         if title is None:
             menu.addSeparator()
-            continue
-        if title == "GAME":
-            game_act = QAction("Игровой режим автоматически", menu)
-            game_act.setCheckable(True)
-            game_act.setChecked(bool(capri.cfg.get("auto_game_mode", True)))
-            def toggle_game(on):
-                capri.cfg["auto_game_mode"] = bool(on)
-                save_setting("auto_game_mode", bool(on))
-                refresh_game_mode()
-            game_act.toggled.connect(toggle_game)
-            menu.addAction(game_act)
             continue
         if title == "MIC":
             mic_menu = menu.addMenu("Микрофон")

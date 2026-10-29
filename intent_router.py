@@ -1,4 +1,5 @@
 """Маленькая локальная модель выбирает действие; исполнение остаётся в Actions."""
+import cancellation
 import json
 import logging
 import math
@@ -142,7 +143,7 @@ class IntentRouter:
             request = urllib.request.Request("http://127.0.0.1:11434/api/chat",
                                              data=json.dumps(payload).encode("utf-8"),
                                              headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with cancellation.open_url(request, timeout=self.timeout) as response:
                 data = json.load(response)
             decision = Decision.parse(json.loads(data["message"]["content"]))
             if decision.action == "search":
@@ -173,7 +174,7 @@ class IntentRouter:
         try:
             request = urllib.request.Request("http://127.0.0.1:11434/api/chat",
                 data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=self.stage_timeout) as response:
+            with cancellation.open_url(request, timeout=self.stage_timeout) as response:
                 return json.loads(json.load(response)["message"]["content"])
         except Exception as error:
             self.retry_at = time.monotonic() + (1 if isinstance(error, TimeoutError) else 30)
@@ -218,7 +219,7 @@ class IntentRouter:
             request = urllib.request.Request("http://127.0.0.1:11434/api/chat",
                                              data=json.dumps(payload).encode("utf-8"),
                                              headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with cancellation.open_url(request, timeout=60) as response:
                 response.read()
         except Exception as error:
             log.info("Диспетчер пока не прогрет: %s", error)

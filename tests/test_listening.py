@@ -21,6 +21,9 @@ class ListeningTests(unittest.TestCase):
         sound = patch("main.play_sound_async")
         sound.start()
         self.addCleanup(sound.stop)
+        stop_audio = patch("main.stop_sound")
+        stop_audio.start()
+        self.addCleanup(stop_audio.stop)
         self.capri.web = Mock()
         self.capri.web.ask.return_value = []
         self.capri.reload_config_if_changed = Mock()
@@ -100,8 +103,62 @@ class ListeningTests(unittest.TestCase):
         self.capri.local.ask.assert_not_called()
         self.capri.say.assert_not_called()
 
-    def test_name_in_game_appears_with_sound_before_command_processing(self):
-        self.capri.game_active = True
+    def test_stop_without_name_discards_queued_text_voice_and_speech(self):
+        self.capri.jobs.put(("text", "первая"))
+        self.capri.jobs.put(("say", "старый ответ"))
+        self.capri.jobs.put(("voice", "команда", b"audio", True, self.capri.voice_generation))
+        self.capri.actions.pending = Mock()
+        self.capri.actions.choice = [("вариант", Mock())]
+        self.capri.on_partial("стоп")
+        self.assertTrue(self.capri.jobs.empty())
+        self.assertIsNone(self.capri.actions.pending)
+        self.assertIsNone(self.capri.actions.choice)
+        self.capri.speaker.stop.assert_called()
+        self.capri.text_command("новая команда")
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "новая команда")
+
+    def test_stop_cancels_active_text_request_and_ignores_late_answer(self):
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        class SlowAI:
+            history = []
+            def ask(self, question):
+                started.set()
+                release.wait(2)
+                self.history.append({"role": "assistant", "content": "Поздний ответ"})
+                finished.set()
+                return "Поздний ответ"
+        self.capri.local = SlowAI()
+        self.capri.actions.handle.return_value = None
+        self.capri.say = Mock(return_value=False)
+        self.capri.text_command("объясни сложный вопрос")
+        worker = threading.Thread(target=self.capri._process, args=(self.capri.jobs.get_nowait(),), daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(1))
+            self.capri.on_partial("стоп пожалуйста")
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.capri.say.assert_not_called()
+        finally:
+            release.set()
+            self.assertTrue(finished.wait(1))
+        self.assertEqual(self.capri.local.history, [])
+
+    def test_stop_is_not_discarded_as_echo_of_assistant(self):
+        self.capri.speaking = True
+        self.capri.speech_words = {"стоп"}
+        self.capri.speaker.playing = True
+        self.capri.on_partial("стоп")
+        self.capri.speaker.stop.assert_called_once()
+        self.assertEqual(self.capri.awake_until, 0)
+
+    def test_text_stop_is_immediate_and_is_not_queued(self):
+        self.capri.jobs.put(("text", "старое"))
+        self.capri.text_command("стоп")
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.speaker.stop.assert_called_once()
+
+    def test_name_appears_with_sound_before_command_processing(self):
         self.capri.glitch_wav = "appearance.wav"
         with patch("main.play_sound_async") as sound, patch.object(self.capri, "_ask_ai") as ai:
             self.capri.on_partial("капри")
@@ -132,8 +189,7 @@ class ListeningTests(unittest.TestCase):
         self.assertEqual(self.capri.router.ask.call_count, 3)
         self.assertEqual(self.capri.local.ask.call_count, 3)
 
-    def test_weather_answer_works_in_game_without_waiting_for_big_model(self):
-        self.capri.game_active = True
+    def test_weather_fallback_works_without_special_resource_mode(self):
         self.capri.actions.handle.return_value = Reply("погода в Краснообске", "research")
         self.capri.ai.available = False
         self.capri.local = Mock()
@@ -452,8 +508,10 @@ class ListeningTests(unittest.TestCase):
 
     def test_stop_discards_queued_voice_command(self):
         self.capri.on_final("капри открой ютуб", b"audio")
+        stale = self.capri.jobs.get_nowait()
         self.capri.on_final("стоп", b"stop")
-        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri._process(stale)
         self.capri.actions.handle.assert_not_called()
 
     def test_stop_during_google_recognition_discards_result(self):
@@ -690,8 +748,8 @@ class ListeningTests(unittest.TestCase):
 
     def test_echo_does_not_stop_own_speech(self):
         self.capri.speaking = True
-        self.capri.speech_words = {"стоп"}
-        self.capri.on_partial("стоп")
+        self.capri.speech_words = {"готово"}
+        self.capri.on_partial("готово")
         self.assertEqual(self.capri.voice_generation, 0)
 
     def test_own_name_in_recent_speech_does_not_open_listening(self):
