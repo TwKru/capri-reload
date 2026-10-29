@@ -1,4 +1,4 @@
-"""Выбор разговорной модели по активному окну, без глобального игрового режима."""
+"""Выбор разговорной модели по запущенным играм, без глобального игрового режима."""
 import ctypes
 from ctypes import wintypes
 import logging
@@ -14,15 +14,25 @@ BROWSERS_AND_TOOLS = {"chrome.exe", "msedge.exe", "firefox.exe", "browser.exe", 
                       "nvidia overlay.exe", "gamebar.exe"}
 KNOWN_GAMES = {"rustclient.exe", "rust.exe", "cs2.exe", "dota2.exe", "gta5.exe", "gta5_enhanced.exe",
                "fortniteclient-win64-shipping.exe", "cyberpunk2077.exe", "witcher3.exe"}
+GAME_HELPERS = {"crashpad_handler.exe", "unitycrashhandler64.exe", "unitycrashhandler32.exe",
+                "crashreportclient.exe", "easyanticheat.exe", "easyanticheat_eos.exe",
+                "battleye.exe", "beservice.exe"}
+
+
+def game_executable(name, executable, additional=()):
+    name = name.lower()
+    if not name or name in BROWSERS_AND_TOOLS or name in GAME_HELPERS:
+        return False
+    path = executable.replace("\\", "/").lower()
+    return name in KNOWN_GAMES or name in additional or any(part in path for part in
+            ("/steamapps/common/", "/epic games/", "/.minecraft/"))
 
 
 def game_window(name, executable, window, monitor, style, additional=()):
     name = name.lower()
     if name in BROWSERS_AND_TOOLS:
         return False
-    path = executable.replace("\\", "/").lower()
-    if name in KNOWN_GAMES or name in additional or any(part in path for part in
-            ("/steamapps/common/", "/epic games/", "/.minecraft/")):
+    if game_executable(name, executable, additional):
         return True
     if style & 0x00C00000 == 0x00C00000:
         return False
@@ -74,6 +84,17 @@ def foreground_game(additional=()):
         return False
 
 
+def game_running(additional=()):
+    """Проверка при запросе: свёрнутая игра тоже требует лёгкой модели."""
+    try:
+        for process in psutil.process_iter(["name", "exe"], ad_value=""):
+            if game_executable(process.info.get("name") or "", process.info.get("exe") or "", additional):
+                return True
+    except (OSError, psutil.Error):
+        pass
+    return foreground_game(additional)
+
+
 class ConversationModels:
     def __init__(self, cfg):
         self.enabled = bool(cfg.get("use_light_model_in_games", True))
@@ -85,7 +106,7 @@ class ConversationModels:
         self.last = None
 
     def choose(self, normal, installed):
-        if not self.enabled or not foreground_game(self.additional):
+        if not self.enabled or not game_running(self.additional):
             return normal
         if self.names is None or time.monotonic() - self.checked > 30:
             self.names = installed() or []
