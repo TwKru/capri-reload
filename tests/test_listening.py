@@ -12,6 +12,36 @@ from request_planner import RequestPlan
 
 
 class ListeningTests(unittest.TestCase):
+    def test_name_cleanup_preserves_command_before_repeated_address(self):
+        for source, expected in (
+                ("Капри громкость браузера 20", "громкость браузера 20"),
+                ("Капри громкость браузера Капри 20", "громкость браузера 20"),
+                ("Капри: громкость Rust 90, Капри!", "громкость rust 90"),
+                ("громкость capricorn 20", "громкость capricorn 20")):
+            with self.subTest(source=source):
+                self.assertEqual(self.capri.strip_wake(source), expected)
+
+    def test_voice_cleanup_removes_misheard_address_only_at_start(self):
+        for source in ("капля каприо громкость браузера 20", "camry громкость браузера 30"):
+            cleaned = self.capri.strip_wake(source, voice=True)
+            self.assertTrue(cleaned.startswith("громкость браузера"))
+        self.assertEqual(self.capri.strip_wake("расскажи про toyota camry", voice=True), "расскажи про toyota camry")
+        self.assertFalse(self.capri.has_wake("camry"))
+
+    def test_cleaned_text_reaches_router_and_command_handler(self):
+        self.capri.router = Mock()
+        self.capri.router.ask.return_value = Decision("command")
+        self.capri.text_command("Капри громкость браузера капри 20")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(self.capri.router.ask.call_args.args[0], "громкость браузера 20")
+        self.capri.actions.handle.assert_called_once_with("громкость браузера 20")
+
+    def test_misheard_name_is_removed_while_already_listening(self):
+        self.capri.awake_until = time.time() + 8
+        self.capri.on_final("капля каприо громкость браузера 20", b"audio")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.handle.assert_called_once_with("громкость браузера 20")
+
     def setUp(self):
         cfg = copy.deepcopy(main.DEFAULTS)
         cfg.update(local_ai=False, use_google_stt=False, intent_router=False)

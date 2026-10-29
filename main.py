@@ -282,7 +282,7 @@ class Capri(QObject):
         self.personality = Personality(enabled=bool(cfg.get("personality", True)))
         self._last_mood = None
         words = sorted(cfg["wake_words"], key=len, reverse=True)
-        self.wake_re = re.compile(r"(?<!\w)(" + "|".join(map(re.escape, words)) + r")(?=\s|$|[,.!?])",
+        self.wake_re = re.compile(r"(?<!\w)(" + "|".join(map(re.escape, words)) + r")(?!\w)",
                                   re.IGNORECASE)
         self.ai = AI(cfg)
         self.ai.personality = self.personality
@@ -446,15 +446,19 @@ class Capri(QObject):
     def has_wake(self, text):
         return bool(self.wake_re.search(text.lower()))
 
-    def strip_wake(self, text):
+    def strip_wake(self, text, voice=False):
         t = text.lower()
-        last = None
-        for last in self.wake_re.finditer(t):
-            pass
-        if last and t[last.end():].strip(" ,.!?"):
-            t = t[last.end():]  # берём то, что сказано после имени (до него могло быть эхо)
+        original = t
         t = self.wake_re.sub(" ", t)
-        return re.sub(r"^[\s,.!?]+|[\s,.!?]+$", "", t)
+        if voice:
+            # Ошибки STT в начале уже принятого обращения. Они не являются
+            # самостоятельными словами пробуждения и не удаляются внутри запроса.
+            t = re.sub(r"^(?:[\s,.:;!?—–-]*(?:капля|каприо|camry|capri)(?!\w))+[\s,.:;!?—–-]*", "", t)
+        if t == original:
+            return text
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"\s+([,.:;!?])", r"\1", t)
+        return t.strip(" ,.:;!?—–-")
 
     def appear(self, seconds):
         if self.glitch_wav:
@@ -598,7 +602,7 @@ class Capri(QObject):
         woke = self.has_wake(text)
         if not woke and now > self.awake_until and not (dismissal and dismissal_hint(text) is True):
             return
-        cmd = self.strip_wake(text) if woke else text
+        cmd = self.strip_wake(text, voice=True)
         if len(cmd) < 2:
             self.command_serial += 1
             self.awake_until = now + self.cfg["listen_window_seconds"]
@@ -947,9 +951,9 @@ class Capri(QObject):
         if self.is_stop_command(cmd):
             self.stop_listening()
             return
-        if self.has_wake(cmd):
+        stripped = self.strip_wake(cmd, voice=kind == "voice")
+        if stripped != cmd or self.has_wake(cmd):
             # имя могло остаться в тексте («капри нажми …»), если Капри уже слушала без него
-            stripped = self.strip_wake(cmd)
             if len(stripped) < 2:
                 # просто позвали по имени — не болтаем, а слушаем
                 self.awake_until = time.time() + self.cfg["listen_window_seconds"]
