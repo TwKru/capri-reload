@@ -111,7 +111,7 @@ DEFAULTS = {
     "tts_timeout_seconds": 8,
     "voice_rate": "+10%",
     "voice_pitch": "+15Hz",
-    "voice_shift": 3,
+    "voice_shift": 1,
     "voice_lively": False,
     "voice_fx": .30,
     "voice_glitch": .25,

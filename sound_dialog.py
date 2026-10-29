@@ -50,7 +50,7 @@ class SoundDialog(QDialog):
         cfg = capri.cfg
         self.volume = _slider(0, 100, int(cfg.get("voice_volume", 100)))
         self.fx = _slider(0, 250, int(float(cfg.get("voice_fx", 0)) * 100))
-        self.pitch = _slider(-20, 60, round(float(cfg.get("voice_shift", 3)) * 10))
+        self.pitch = _slider(-20, 60, round(float(cfg.get("voice_shift", 1)) * 10))
         self.pitch.setToolTip("0 — исходная высота. Больше — голос писклявее. Единица — полутон.")
         self.glitch = _slider(0, 100, round(float(cfg.get("voice_glitch", .25)) * 100))
         self.glitch.setToolTip("Вероятность короткого повтора в реплике. 0 — без заиканий.")
