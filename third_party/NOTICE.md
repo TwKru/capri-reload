@@ -1,4 +1,20 @@
-# Kokoro Russian pronunciation helpers
+# Third-party code and dialogue appearance
+
+## Capri Desktop dialogue appearance
+
+Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
+
+The speech-panel appearance in `avatar.py` (`Avatar._hud`, the coloured speaker
+label in `_prepare_subtitle`) is adapted from `CapriDesktop.SpeechBox` and
+`Look.Plate` in `app/Talk.cs` from Capri Desktop.
+The supplied source is in `C:\capri-desktop-main`.
+License: PolyForm Noncommercial 1.0.0; full terms in `LICENSE-CAPRI-DESKTOP.md`.
+Changes: reimplemented for PySide6/QPainter, Russian prompt text, fixed dimensions
+and the existing avatar-relative position, reversed tail below the avatar,
+safe rich-text escaping and cached bounded text layout. Controls live in the menu.
+No source-project AI, speech, avatar, or desktop-control implementation is included.
+
+## Kokoro helpers
 
 `kokoro_ru_frontend.py` is adapted from zaakirio/kokoro-ru, `ru_g2p.py`,
 revision d649c57b239b18c4c384378127cbf01dba039bc1.

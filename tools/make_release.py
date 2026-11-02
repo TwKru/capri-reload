@@ -11,8 +11,8 @@ import zipfile
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {"models", "reports", "samples", "__pycache__", ".ruff_cache", ".pytest_cache",
-             ".git", ".github", ".claude", ".capri-update-backup"}
-SKIP_FILES = {"config.json", "capri.log", ".capri-version", ".capri-update.lock"}
+             ".git", ".github", ".claude", ".venv", "venv", ".capri-update-backup"}
+SKIP_FILES = {"config.json", "memory.json", "capri.log", ".capri-version", ".capri-update.lock"}
 SKIP_EXT = (".pyc", ".tmp", ".zip", ".log")
 
 

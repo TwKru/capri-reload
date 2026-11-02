@@ -21,7 +21,7 @@ VERSION_FILE = ".capri-version"
 BACKUP_DIR = ".capri-update-backup"
 PROTECTED_DIRS = {".git", ".ruff_cache", ".pytest_cache", "__pycache__", "models", "reports", "samples",
                   BACKUP_DIR, ".claude"}
-PROTECTED_FILES = {"config.json", "capri.log", VERSION_FILE, "capri-update.log", ".capri-update.lock"}
+PROTECTED_FILES = {"config.json", "memory.json", "capri.log", VERSION_FILE, "capri-update.log", ".capri-update.lock"}
 log = logging.getLogger("capri.updater")
 
 

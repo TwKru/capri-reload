@@ -61,6 +61,25 @@ class DesktopInteractionTests(unittest.TestCase):
             self.assertFalse(self.view.stroke_head(QPointF(x, 430), 10 + index * .15))
         self.assertIsNone(self.view.anim)
 
+    def test_controls_are_in_menu_and_avatar_right_click_does_nothing(self):
+        from PySide6.QtWidgets import QToolButton
+        self.assertEqual(self.view.findChildren(QToolButton), [])
+        self.assertEqual(self.view.contextMenuPolicy(), Qt.ContextMenuPolicy.NoContextMenu)
+        events = []
+        self.view.clicked.connect(lambda: events.append("listen"))
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.RightButton)
+        self.view.mousePressEvent(event)
+        self.view.mouseReleaseEvent(event)
+        self.assertEqual(events, [])
+        self.assertIsNone(self.view._press)
+
+    def test_avatar_stays_visible_while_editing_request(self):
+        self.view.editing_request = True
+        self.view.hide_at = 1
+        self.view.next_spin = float("inf")
+        self.view.tick()
+        self.assertEqual(self.view.state, "visible")
+
     def test_sleep_stays_visible_and_wakes_on_summon(self):
         self.view.play_anim("sleep")
         self.view.set_mode("idle")

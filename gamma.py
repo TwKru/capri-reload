@@ -7,7 +7,7 @@ import tempfile
 import threading
 from ctypes import wintypes
 
-MAX_GAMMA = 4.5
+MAX_GAMMA = 5.0
 MIN_GAMMA = 0.5
 Ramp = ctypes.c_ushort * (3 * 256)
 _lock = threading.Lock()

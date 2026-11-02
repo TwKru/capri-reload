@@ -1,6 +1,7 @@
 """Окно-аватар Капри: прозрачное, поверх всех окон, с глитч-эффектами,
 вспышками и «лагами» при появлении, речи и исчезновении."""
 import math
+from html import escape
 import json
 import os
 import random
@@ -19,8 +20,9 @@ CYAN = QColor(0, 240, 255)
 WHITE = QColor(255, 255, 255)
 DARK = QColor(10, 6, 18)
 
-W, H = 340, 500        # размер окна
+W, H = 340, 500        # фигура и панель диалога; всё управление находится в меню
 FIG_H = 380            # высота области фигуры, ниже — HUD с субтитрами
+HUD_H = 120
 APPEAR_FRAMES = 30
 VANISH_FRAMES = 16
 
@@ -540,7 +542,6 @@ def load_anims(anim_dir):
 class Avatar(QWidget):
     clicked = Signal()
     petted = Signal()
-    menu_requested = Signal(QPoint)
 
     def __init__(self, assets_dir):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -549,6 +550,7 @@ class Avatar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(W, H)
         self.setMouseTracking(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         global DPR
         DPR = max([s.devicePixelRatio() for s in QGuiApplication.screens()] or [1.0])
 
@@ -627,6 +629,7 @@ class Avatar(QWidget):
         self.hide_at = 0.0
         self.hide_after = 12.0
         self.subtitle = ""
+        self.dialogue_request = ""
         self._subtitle_key = None
         self._subtitle_static = None
         self._tint_cache = OrderedDict()
@@ -639,7 +642,8 @@ class Avatar(QWidget):
         self.user_moved = False
         self._press = None
         self._moved = False
-
+        self.editing_request = False
+        self.voice_paused = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
 
@@ -843,8 +847,13 @@ class Avatar(QWidget):
         self.hide_at = max(time.time() + self.hide_after, self.dance_until + .5) if mode == "idle" and not self.sleeping else 0
         self.burst, self.burst_level = random.randint(3, 6), random.uniform(.4, .9)
 
+    def set_voice_paused(self, paused):
+        self.voice_paused = paused
+
     def set_subtitle(self, text):
         self.subtitle = text or ""
+        if self.subtitle.startswith("> "):
+            self.dialogue_request = self.subtitle[2:]
 
     def set_mood(self, mood):
         if mood not in ("neutral", "hurt", "happy", "playful", "bored"):
@@ -896,7 +905,7 @@ class Avatar(QWidget):
         elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
               and self.mode not in ("idle", "listening", "thinking") and not self.sleeping):
             self.change_pose()
-        elif self.state == "visible" and self.hide_at and now > self.hide_at:
+        elif self.state == "visible" and self.hide_at and now > self.hide_at and not self.editing_request:
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
@@ -1095,50 +1104,67 @@ class Avatar(QWidget):
         p.fillRect(QRectF(x, y, width, height), WHITE)
 
     def _hud(self, p, glitch):
-        # на прогулке окно с текстом сверху, фигура под ним
+        # SpeechBox visual adapted from Capri Desktop, app/Talk.cs (Lachy, 2026).
+        # PolyForm Noncommercial 1.0.0: third_party/LICENSE-CAPRI-DESKTOP.md.
+        # Сохраняем прежнюю область HUD: на прогулке сверху, обычно под фигурой.
         top = 6 if self.roaming else FIG_H + 6
-        bottom = top + (H - FIG_H) - 12
-        panel = QPolygonF([QPointF(6, top), QPointF(W - 22, top), QPointF(W - 6, top + 16),
-                           QPointF(W - 6, bottom), QPointF(22, bottom), QPointF(6, bottom - 16)])
-        p.setPen(QPen(PINK, 1.5))
-        p.setBrush(QColor(10, 4, 16, 215))
-        p.drawPolygon(panel)
+        bottom = top + HUD_H - 12
+        panel_top = top + 8
+        points = [QPointF(16, panel_top)]
+        if not self.roaming:
+            points += [QPointF(94, panel_top), QPointF(88, top - 4), QPointF(110, panel_top)]
+        points += [QPointF(W - 8, panel_top), QPointF(W - 8, bottom)]
+        if self.roaming:
+            points += [QPointF(254, bottom), QPointF(246, bottom + 12), QPointF(232, bottom)]
+        points += [QPointF(16, bottom), QPointF(8, bottom - 8), QPointF(8, panel_top + 8)]
+        outline = QPolygonF(points)
+        panel = QPainterPath()
+        panel.addPolygon(outline)
+        panel.closeSubpath()
+        p.save()
+        p.setPen(QPen(QColor(58, 214, 235, 46), 7))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(panel)
+        p.fillPath(panel, QColor(9, 11, 15, 238))
+        p.setClipPath(panel)
+        p.setPen(QPen(QColor(255, 255, 255, 9), 1))
+        for row in range(panel_top, bottom, 3):
+            p.drawLine(8, row, W - 8, row)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(58, 214, 235), 2))
+        p.drawPath(panel)
+        p.fillRect(QRectF(18, panel_top + 12, 3, bottom - panel_top - 24), QColor(232, 36, 64))
 
-        font = QFont("Consolas", 10)
-        font.setBold(True)
+        prompt_font = QFont("Consolas", 9)
+        prompt_font.setItalic(True)
+        p.setFont(prompt_font)
+        p.setPen(QColor(122, 128, 138))
+        prompt = "> ты: " + (self.dialogue_request or "…")
+        prompt = p.fontMetrics().elidedText(prompt.replace("\n", " ")[:4096], Qt.TextElideMode.ElideRight, W - 54)
+        p.drawText(QRectF(30, panel_top + 7, W - 54, 19), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, prompt)
+
+        rect = QRectF(30, panel_top + 28, W - 54, bottom - panel_top - 35)
+        font, text = self._prepare_subtitle(rect, dialogue=True)
         p.setFont(font)
-        label = STATUS_TEXT.get(self.mode, "")
-        if self.mode == "idle":
-            label = {"hurt": "ОБИЖЕНА", "happy": "ДОВОЛЬНА", "playful": "ШАЛЮ", "bored": "СКУЧАЮ"}.get(self.mood, label)
-        if self.sleeping:
-            label = "ДРЕМЛЮ"
-        status = "// CAPRI :: " + label
-        p.setPen({"hurt": PURPLE, "happy": GREEN, "playful": PINK, "bored": CYAN}.get(self.mood, GREEN))
-        p.drawText(16, top + 20, status)
-
-        # «эквалайзер»
-        level = {"speaking": 1.0, "listening": .5, "thinking": .3}.get(self.mode, .12)
-        for i in range(10):
-            h = 2 + random.random() * 14 * level
-            p.fillRect(QRectF(W - 120 + i * 9, top + 22 - h, 6, h), PINK if i % 3 else CYAN)
-
-        rect = QRectF(16, top + 30, W - 32, bottom - top - 34)
-        font, text = self._prepare_subtitle(rect)
-        p.setFont(font)
-        p.setPen(QColor(0, 240, 255, 170))
-        p.drawStaticText(rect.topLeft() + QPointF(1.5, 1), text)
-        p.setPen(QColor(255, 200, 220))
+        p.setPen(QColor(56, 176, 255))
         p.drawStaticText(rect.topLeft(), text)
+        p.restore()
 
-    def _prepare_subtitle(self, rect):
-        key = self.subtitle, rect.width(), rect.height(), DPR
+    def _prepare_subtitle(self, rect, dialogue=False):
+        value = self.subtitle
+        if dialogue and (not value or value.startswith("> ")):
+            value = ("Прослушивание выключено." if self.voice_paused else
+                     "Думаю…" if self.mode == "thinking" else "Слушаю…" if self.mode == "listening" else "Я рядом.")
+        key = value, rect.width(), rect.height(), DPR, dialogue
         if key == self._subtitle_key:
             return self._subtitle_static
         # Текст ИИ может быть длинным: полный ответ остаётся в subtitle, ограничен только видимый фрагмент.
-        full = self.subtitle[:4096]
+        full = value[:4096]
         def layout(value, font):
+            if dialogue:
+                value = '<span style="color:#e82440; font-weight:bold">CAPRI:</span> ' + escape(value).replace("\n", "<br>")
             text = QStaticText(value)
-            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setTextFormat(Qt.TextFormat.RichText if dialogue else Qt.TextFormat.PlainText)
             text.setTextWidth(rect.width())
             option = QTextOption()
             option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
@@ -1150,7 +1176,7 @@ class Avatar(QWidget):
             text = layout(full, font)
             if text.size().height() <= rect.height():
                 break
-        if text.size().height() > rect.height() or len(self.subtitle) > len(full):
+        if text.size().height() > rect.height() or len(value) > len(full):
             lo, hi = 0, len(full)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
@@ -1169,7 +1195,7 @@ class Avatar(QWidget):
         p.drawImage(0, 0, self.frame)
         p.end()
 
-    # ---------- мышь: клик — позвать, тащить — переместить, ПКМ — меню ----------
+    # ---------- мышь: клик — позвать, тащить — переместить; ПКМ отключён ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.wake_up()
@@ -1180,8 +1206,6 @@ class Avatar(QWidget):
             self.hopping, self.hop_home, self.tele_target = False, None, None
             self.hide_at = 0
             self._moved = False
-        elif e.button() == Qt.MouseButton.RightButton:
-            self.menu_requested.emit(e.globalPosition().toPoint())
 
     def stroke_head(self, point, now):
         if (self._press is not None or self.state != "visible" or self.mode != "idle" or

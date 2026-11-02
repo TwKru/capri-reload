@@ -36,3 +36,7 @@ It does NOT grant any rights to:
 - third_party/misaki_espeak.py: Apache License 2.0, adapted from hexgrad/misaki;
   see third_party/NOTICE.md and its license files;
 - separately downloaded Kokoro-RU model weights: OpenRAIL, see the upstream model card.
+
+- dialogue-panel appearance adapted in avatar.py from Capri Desktop app/Talk.cs:
+  PolyForm Noncommercial 1.0.0, Copyright 2026 Lachy;
+  see third_party/NOTICE.md and third_party/LICENSE-CAPRI-DESKTOP.md.

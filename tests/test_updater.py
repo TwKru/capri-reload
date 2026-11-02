@@ -35,16 +35,17 @@ class UpdaterTests(unittest.TestCase):
                          "https://codeload.github.com/TwKru/capri-reload/zip/" + self.sha)
 
     def test_install_preserves_personal_files_git_and_unknown_files(self):
-        for name in ("config.json", "capri.log", "my-notes.txt"):
+        for name in ("config.json", "memory.json", "capri.log", "my-notes.txt"):
             (self.base / name).write_text("personal")
         (self.staged / "config.json").write_text("must not replace")
+        (self.staged / "memory.json").write_text("must not replace")
         (self.base / ".git").mkdir()
         (self.base / ".git" / "config").write_text("git settings")
         count, backup = updater.install(self.staged, self.base, self.sha)
         self.assertEqual(count, 1)
         self.assertEqual((self.base / "main.py").read_text(), "new = True\n")
         self.assertEqual((backup / "main.py").read_text(), "old = True\n")
-        for name in ("config.json", "capri.log", "my-notes.txt"):
+        for name in ("config.json", "memory.json", "capri.log", "my-notes.txt"):
             self.assertEqual((self.base / name).read_text(), "personal")
         self.assertEqual((self.base / ".git" / "config").read_text(), "git settings")
         self.assertEqual(updater.installed_version(self.base), self.sha)

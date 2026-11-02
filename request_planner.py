@@ -115,6 +115,20 @@ def compact_sources(question, sources, selection=None, budget=1800):
     return result
 
 
+def economy_plan(question, explicit_query=None):
+    """План без платного запроса: свежие сведения ищем, остальное объясняет модель."""
+    plan = fallback_plan(question, explicit_query)
+    if plan.route == "web":
+        return plan
+    text = question.lower()
+    if re.search(r"погод|прогноз|новост|сейчас|сегодня|завтра|вчера|свеж|актуальн|последн|"
+                 r"(?:сколько|поч[её]м) стоит|цен[аыу]|курс\b|расписан|результат матча|"
+                 r"кто (?:ныне |теперь )?(?:президент|премьер|директор|глава)|"
+                 r"(?:посоветуй|порекомендуй|подбери|найди)\b", text):
+        return RequestPlan("web", "simple", question[:500])
+    return RequestPlan("local", "simple")
+
+
 def fallback_plan(question, explicit_query=None):
     """При сбое мини-модели сеть допустима лишь для явного поиска/текущей погоды."""
     if explicit_query is not None:

@@ -71,7 +71,7 @@ class AI:
         while self.history and self.history[0]["role"] != "user":
             self.history.pop(0)
         try:
-            system = SYSTEM + "\n" + self._context()
+            system = SYSTEM + "\n" + self._context() + getattr(self, "extra_memory", "")
             messages = list(self.history)
             if web_context:
                 system += ("\nВеб-поиск уже выполнен диспетчером. Ответь по фрагментам ниже. "

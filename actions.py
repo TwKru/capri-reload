@@ -2144,7 +2144,7 @@ class Actions:
         with open(path, "w", encoding="utf-8") as f:
             f.write(report)
         start_file(path)
-        use_ai = self.cfg.get("enable_ai") and self.ai and self.ai.available
+        use_ai = (self.cfg.get("ai_mode") in ("openai", "gemini") or self.cfg.get("enable_ai")) and self.ai and self.ai.available
         spoken = self.ai.summarize_report(report) if use_ai else None
         if not spoken and self.local:
             spoken = self.local_reply("summarize_report", report) if self.local_reply else self.local.summarize_report(report)

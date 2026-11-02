@@ -72,6 +72,35 @@ class RenderCacheTests(unittest.TestCase):
             self.assertGreater(layout.call_count, count)
         self.assertEqual(view.subtitle, "Новый ответ.")
 
+    def test_dialogue_keeps_question_and_treats_reply_markup_as_plain_text(self):
+        view = avatar.Avatar(str(self.root))
+        self.addCleanup(view.close)
+        self.addCleanup(view.overlay.close)
+        view.set_subtitle("> Как вывести <b> в тексте?")
+        view.set_subtitle('Напиши <b>пример</b> & "кавычки".')
+        self.assertEqual(view.dialogue_request, "Как вывести <b> в тексте?")
+        rect = QRectF(30, 422, 286, 65)
+        font, text = view._prepare_subtitle(rect, dialogue=True)
+        self.assertIn("CAPRI:", text.text())
+        self.assertIn("&lt;b&gt;пример&lt;/b&gt;", text.text())
+        self.assertIn("&amp;", text.text())
+        self.assertIs(view._prepare_subtitle(rect, dialogue=True)[1], text)
+        self.assertLessEqual(text.size().height(), rect.height())
+        self.assertEqual(view.subtitle, 'Напиши <b>пример</b> & "кавычки".')
+
+    def test_dialogue_thinking_does_not_repeat_user_command_as_answer(self):
+        view = avatar.Avatar(str(self.root))
+        self.addCleanup(view.close)
+        self.addCleanup(view.overlay.close)
+        view.set_subtitle("> Открой браузер")
+        view.mode = "thinking"
+        rect = QRectF(30, 422, 286, 65)
+        _, text = view._prepare_subtitle(rect, dialogue=True)
+        self.assertIn("Думаю", text.text())
+        self.assertNotIn("Открой браузер", text.text())
+        view.mode = "listening"
+        self.assertIn("Слушаю", view._prepare_subtitle(rect, dialogue=True)[1].text())
+
 
 class SharedSpeechTests(unittest.TestCase):
     def test_concurrent_requests_for_same_phrase_synthesize_once(self):

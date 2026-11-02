@@ -2,9 +2,9 @@
 Общие настройки звука Windows не меняются."""
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
-from entries_dialog import STYLE
+from theme import STYLE, CyberDialog as QDialog
 from voice import GATE_MAX
 
 PINK, CYAN, GREEN, DIM = QColor(255, 34, 96), QColor(0, 240, 255), QColor(40, 255, 150), QColor(90, 60, 90)
@@ -44,9 +44,7 @@ class SoundDialog(QDialog):
         super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
         self.capri = capri
         self.setWindowTitle("Капри — звук")
-        self.setStyleSheet(STYLE + "QSlider::groove:horizontal { height: 6px; background: #3a1a3a; }"
-                                   "QSlider::handle:horizontal { width: 14px; margin: -5px 0; background: #ff2260; }"
-                                   "QSlider::sub-page:horizontal { background: #ff2260; }")
+        self.setStyleSheet(STYLE)
         cfg = capri.cfg
         self.volume = _slider(0, 100, int(cfg.get("voice_volume", 100)))
         self.fx = _slider(0, 250, int(float(cfg.get("voice_fx", 0)) * 100))
@@ -110,12 +108,13 @@ class SoundDialog(QDialog):
         self._labels()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
+        self.finished.connect(self.timer.stop)
         self.timer.start(50)
 
     @staticmethod
     def _title(text):
         lbl = QLabel(text)
-        lbl.setStyleSheet("color: #28ff96; font-weight: bold;")
+        lbl.setStyleSheet("color: #3ad6eb; font-weight: bold;")
         return lbl
 
     @staticmethod

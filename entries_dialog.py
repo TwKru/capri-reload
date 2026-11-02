@@ -4,22 +4,11 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTreeWidget,
+from PySide6.QtWidgets import (QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QPushButton, QTabWidget, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout)
-
-STYLE = """
-QDialog { background: #0a0612; color: #ffd2e1; }
-QLabel { color: #ffd2e1; }
-QTabWidget::pane { border: 1px solid #ff2260; }
-QTabBar::tab { background: #1a0a1e; color: #ffd2e1; padding: 6px 14px; border: 1px solid #ff2260; }
-QTabBar::tab:selected { background: #ff2260; color: #0a0612; }
-QTreeWidget, QLineEdit { background: #120818; color: #ffd2e1; border: 1px solid #5a2a50;
-                         selection-background-color: #ff2260; selection-color: #0a0612; }
-QHeaderView::section { background: #1a0a1e; color: #28ff96; border: 0; padding: 4px; }
-QPushButton { background: #1a0a1e; color: #ffd2e1; border: 1px solid #ff2260; padding: 5px 14px; }
-QPushButton:hover { background: #ff2260; color: #0a0612; }
-"""
+from theme import (STYLE, CyberDialog as QDialog, CyberFileDialog as QFileDialog,
+                   CyberMessageBox as QMessageBox, CyberInputDialog as QInputDialog)
 URL_RE = re.compile(r"^(https?://)?[\w\-]+(\.[\w\-]+)*\.[a-zа-я]{2,}(:\d+)?(/\S*)?$", re.IGNORECASE)
 
 
@@ -199,7 +188,6 @@ class EntriesDialog(QDialog):
 
 
 def _ask_name(parent, guess):
-    from PySide6.QtWidgets import QInputDialog
     name, ok = QInputDialog.getText(parent, "Название",
                                     "Как ты будешь её называть? (то, что скажешь после «открой»)", text=guess)
     return name.strip(), ok

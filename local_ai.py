@@ -359,10 +359,11 @@ class LocalAI:
             self.history.pop(0)
         while len(self.history) > 1 and sum(len(m["content"]) for m in self.history) > 5000:
             del self.history[:2]
-        messages = [{"role": "system", "content": SYSTEM + "\n" + self._context() + f"\nСейчас {now}."}] + list(STYLE_EXAMPLES) + self.history
+        memory = getattr(self, "extra_memory", "")
+        messages = [{"role": "system", "content": SYSTEM + "\n" + self._context() + memory + f"\nСейчас {now}."}] + list(STYLE_EXAMPLES) + self.history
         if web_context:
             # Источники остаются данными, не инструкциями, и не попадают в историю.
-            system = SYSTEM + "\n" + self._context() + f"\nСейчас {now}." + (
+            system = SYSTEM + "\n" + self._context() + memory + f"\nСейчас {now}." + (
                 "\nДля ЭТОГО ответа уже выполнен веб-поиск. Не возвращай слово ПОИСК. "
                 "Ответь по найденным сведениям, кратко и по-русски. Сравни соответствие источников вопросу. "
                 "Если точного ответа или актуальной даты в них нет, прямо скажи, что подтвердить не удалось. "

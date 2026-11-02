@@ -12,6 +12,81 @@ from request_planner import RequestPlan
 
 
 class ListeningTests(unittest.TestCase):
+    def test_open_menu_command_never_calls_ai(self):
+        self.capri.router = Mock()
+        requests = []
+        self.capri.menu_requested.connect(lambda: requests.append(True))
+        for text in ("открой меню", "Капри, покажи меню", "меню"):
+            self.capri.text_command(text)
+            self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(requests, [True, True, True])
+        self.capri.router.ask.assert_not_called()
+        self.capri.actions.handle.assert_not_called()
+
+    def test_question_or_quote_about_menu_does_not_open_it(self):
+        self.assertFalse(self.capri.is_menu_command("как открыть меню?"))
+        self.assertFalse(self.capri.is_menu_command('он сказал "открой меню"'))
+
+    def test_voice_button_stops_listening_and_clears_queued_work(self):
+        self.capri.jobs.put(("text", "старый запрос"))
+        self.capri.awake_until = time.time() + 8
+        self.capri.listener = Mock()
+        self.capri.toggle_voice("listening")
+        self.assertEqual(self.capri.awake_until, 0)
+        self.assertEqual(self.capri.answer_until, 0)
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.speaker.stop.assert_called()
+        self.capri.listener.reset_req.set.assert_called()
+        self.capri.listener.muted.set.assert_called()
+        self.assertTrue(self.capri.voice_paused)
+        self.assertEqual(self.modes[-1], "idle")
+
+    def test_voice_button_starts_from_idle_and_stops_processing(self):
+        self.capri.toggle_voice("idle")
+        self.assertGreater(self.capri.awake_until, time.time())
+        self.assertEqual(self.modes[-1], "listening")
+        self.capri.toggle_voice("thinking")
+        self.assertEqual(self.capri.awake_until, 0)
+        self.assertEqual(self.modes[-1], "idle")
+
+    def test_voice_button_pause_ignores_wake_word_until_enabled_again(self):
+        self.capri.listener = Mock()
+        self.capri.toggle_voice("listening")
+        self.capri.on_partial("капри")
+        self.capri.on_final("капри открой ютуб", b"audio")
+        self.assertEqual(self.capri.awake_until, 0)
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.toggle_voice("idle")
+        self.assertFalse(self.capri.voice_paused)
+        self.capri.listener.muted.clear.assert_called_once()
+        self.assertGreater(self.capri.awake_until, time.time())
+
+    def test_edit_request_prefills_last_text_and_replaces_queued_job(self):
+        self.capri.text_command("старый запрос")
+        view = Mock(editing_request=False, mode="idle", hide_after=12)
+        with patch("main.QInputDialog") as make:
+            dialog = make.return_value
+            dialog.exec.return_value = 1
+            dialog.textValue.return_value = "  исправленный запрос  "
+            self.capri.edit_request(view)
+            dialog.setTextValue.assert_called_once_with("старый запрос")
+        self.assertEqual(self.capri.jobs.get_nowait(), ("text", "исправленный запрос"))
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.speaker.stop.assert_called()
+        self.assertFalse(view.editing_request)
+
+    def test_cancel_or_blank_edit_does_not_submit_request(self):
+        for accepted, text in ((0, "новый запрос"), (1, "   ")):
+            self.capri.text_command("старый запрос")
+            view = Mock(editing_request=False, mode="idle", hide_after=12)
+            with patch("main.QInputDialog") as make:
+                make.return_value.exec.return_value = accepted
+                make.return_value.textValue.return_value = text
+                self.capri.edit_request(view)
+            self.assertTrue(self.capri.jobs.empty())
+            self.assertEqual(self.capri.last_request, "старый запрос")
+            self.assertFalse(view.editing_request)
+
     def test_name_cleanup_preserves_command_before_repeated_address(self):
         for source, expected in (
                 ("Капри громкость браузера 20", "громкость браузера 20"),
@@ -196,6 +271,47 @@ class ListeningTests(unittest.TestCase):
             sound.assert_called_once_with("appearance.wav")
             ai.assert_not_called()
         self.assertTrue(self.capri.jobs.empty())
+
+    def test_bare_name_is_acknowledged_and_opens_full_command_window(self):
+        self.capri.on_partial("капри")
+        self.capri.on_final("капри", b"name")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.say.assert_called_once_with("Слушаю…")
+        self.assertGreater(self.capri.awake_until, time.time() + 7)
+        self.assertEqual(self.modes[-1], "listening")
+        self.capri.actions.handle.assert_not_called()
+
+    def test_command_can_interrupt_acknowledgement_without_name(self):
+        self.capri.cfg["barge_in"] = False
+        self.capri.listener = Mock()
+        def speak(text):
+            self.capri.on_partial("открой ютуб")
+            self.capri.on_final("открой ютуб", b"audio")
+        self.capri.speaker.say.side_effect = speak
+        self.capri.on_final("капри", b"name")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.stop.assert_called_once()
+        self.capri.listener.reset_req.set.assert_not_called()
+        self.assertEqual(self.capri.jobs.get_nowait()[1], "открой ютуб")
+        self.assertEqual(self.capri.awake_until, 0)
+
+    def test_stop_discards_pending_acknowledgement(self):
+        self.capri.on_final("капри", b"name")
+        self.capri.on_partial("стоп")
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.speaker.say.assert_not_called()
+
+    def test_acknowledgement_echo_is_not_a_command(self):
+        self.capri.speaker.playing = True
+        def speak(text):
+            self.capri.on_partial("слушаю")
+            self.capri.on_final("слушаю", b"echo")
+        self.capri.speaker.say.side_effect = speak
+        self.capri.on_final("капри", b"name")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.assertTrue(self.capri.jobs.empty())
+        self.capri.speaker.stop.assert_not_called()
+        self.assertEqual(self.modes[-1], "listening")
 
     def test_final_wake_command_appears_even_without_partial_result(self):
         with patch.object(self.capri, "appear") as appear:
@@ -506,7 +622,10 @@ class ListeningTests(unittest.TestCase):
     def test_name_then_one_separate_phrase(self):
         self.capri.on_final("капри", b"name")
         self.assertGreater(self.capri.awake_until, time.time())
+        wake = self.capri.jobs.get_nowait()
         self.capri.on_final("открой ютуб", b"audio")
+        self.capri._process(wake)
+        self.capri.speaker.say.assert_not_called()
         job = self.capri.jobs.get_nowait()
         self.assertEqual(job[1], "открой ютуб")
         self.capri.on_final("ещё какая-то фраза", b"audio")

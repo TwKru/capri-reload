@@ -2,12 +2,10 @@
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
+from PySide6.QtWidgets import (QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
                                QVBoxLayout)
 
-from entries_dialog import STYLE
-
-RADIO = "QRadioButton { color: #ffd2e1; } QRadioButton::indicator:checked { background: #ff2260; }"
+from theme import STYLE, CyberDialog as QDialog
 
 
 class ProfileDialog(QDialog):
@@ -15,7 +13,7 @@ class ProfileDialog(QDialog):
         super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
         self.capri = capri
         self.setWindowTitle("Капри — как ко мне обращаться")
-        self.setStyleSheet(STYLE + RADIO)
+        self.setStyleSheet(STYLE)
         cfg = capri.cfg
         win, pc = os.environ.get("USERNAME", ""), os.environ.get("COMPUTERNAME", "")
 
@@ -67,7 +65,7 @@ class ProfileDialog(QDialog):
     @staticmethod
     def _title(text):
         lbl = QLabel(text)
-        lbl.setStyleSheet("color: #28ff96; font-weight: bold;")
+        lbl.setStyleSheet("color: #3ad6eb; font-weight: bold;")
         return lbl
 
     def save(self):
