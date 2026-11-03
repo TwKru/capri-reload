@@ -1,0 +1,1 @@
+"""capri/desktop — модули Capri."""

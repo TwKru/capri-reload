@@ -1,17 +1,22 @@
 """Настроение не вызывает ИИ, не подменяет команды и не требует фоновых таймеров."""
 import copy
 import json
-from pathlib import Path
 import tempfile
 import unittest
-from intent_router import Decision
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-from actions import Actions, Reply
-from ai import AI
-from local_ai import LocalAI
-import main
-from personality import ANGRY_CONTEXT, ANGRY_REPLIES, ANGRY_COMMAND_LINES, Personality
+from capri.ai.intent_router import Decision
+from capri.ai.persona.mood import (
+    ANGRY_COMMAND_LINES,
+    ANGRY_CONTEXT,
+    ANGRY_REPLIES,
+    Personality,
+)
+from capri.ai.providers.legacy_anthropic import AI
+from capri.ai.providers.ollama_chat import LocalAI
+from capri.app import controller as main
+from capri.automation.command_dispatcher import Actions, Reply
 
 
 class PersonalityTests(unittest.TestCase):
@@ -176,7 +181,7 @@ class PersonalityTests(unittest.TestCase):
 
 class PersonalityCommandTests(unittest.TestCase):
     def setUp(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.actions = Actions({}, ".", None)
         self.actions.personality = Personality(persist=False)
 
@@ -213,7 +218,7 @@ class PersonalityCommandTests(unittest.TestCase):
         self.assertIsNone(self.actions.choice)
         self.assertEqual(self.actions.personality.mood, "hurt")
 
-    def test_social_request_passes_router_but_skips_google_and_big_model(self):
+    def test_recognized_social_request_skips_router_google_and_big_model(self):
         cfg = copy.deepcopy(main.DEFAULTS)
         cfg.update(local_ai=False, intent_router=False, use_google_stt=True)
         with patch.object(main, "Actions", return_value=self.actions), patch.object(main, "Speaker"), \
@@ -229,8 +234,7 @@ class PersonalityCommandTests(unittest.TestCase):
         self.assertEqual(capri.personality.mood, "hurt")
         capri.say.assert_called_once()
         google.assert_not_called()
-        ai.assert_called_once()
-        self.assertIs(ai.call_args.args[0], capri.router)
+        ai.assert_not_called()
         capri.local.ask.assert_not_called()
 
 

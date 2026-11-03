@@ -15,7 +15,7 @@ pause
 exit /b 1
 
 :install
-%PY% tools\install.py
+%PY% -m tools.install_dependencies
 pause
 exit /b
 

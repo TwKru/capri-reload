@@ -1,16 +1,16 @@
 """Voice pack authenticity, Russian phonemes, cancellation and backend routing."""
 import hashlib
 import json
-from pathlib import Path
 import queue
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
 import zipfile
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-import kokoro_voice as kv
-import voice
+from capri.audio import kokoro_backend as kv
+from capri.audio import voice_service as voice
 
 
 class VoicePackTests(unittest.TestCase):
@@ -123,7 +123,7 @@ class LocalVoiceClientTests(unittest.TestCase):
 
     def test_stop_during_synthesis_does_not_switch_to_windows_or_mark_failure(self):
         speaker = voice.Speaker({"tts_engine": "kokoro"})
-        with patch("voice.os.path.isfile", return_value=False), \
+        with patch("capri.audio.voice_service.os.path.isfile", return_value=False), \
                 patch.object(speaker, "_edge", side_effect=InterruptedError), \
                 patch.object(speaker, "_sapi") as fallback:
             self.assertTrue(speaker.say("Привет."))

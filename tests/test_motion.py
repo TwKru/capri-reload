@@ -1,13 +1,14 @@
-"""Плавная ходьба и повороты: команды, цикл, направление, остановка и игровой режим."""
+"""Flight replaces walking; existing motion commands remain compatible."""
 import os
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
-import avatar  # noqa: E402
-from actions import Actions  # noqa: E402
+
+from capri.automation.command_dispatcher import Actions  # noqa: E402
+from capri.desktop import avatar  # noqa: E402
 
 
 class MotionTests(unittest.TestCase):
@@ -21,8 +22,9 @@ class MotionTests(unittest.TestCase):
         self.addCleanup(self.view.close)
         self.addCleanup(self.view.overlay.close)
 
-    def test_both_motions_have_96_frames_and_bounded_caches(self):
-        for name in ("walk", "spin"):
+    def test_spin_has_96_frames_and_bounded_caches(self):
+        self.assertNotIn("walk",self.view.anims)
+        for name in ("spin",):
             frames = self.view.anims[name]
             self.assertEqual(len(frames), 96)
             self.assertEqual(frames.fps, 60)
@@ -33,7 +35,7 @@ class MotionTests(unittest.TestCase):
             self.assertNotEqual(frames[0], frames[24])
             self.assertEqual(frames[-1], frames[95])
 
-    def test_walk_can_start_while_visible_without_hiding_first(self):
+    def test_flight_can_start_while_visible_without_hiding_first(self):
         self.view.state = "visible"
         with patch.object(self.view, "raise_"):
             self.view.start_roam()
@@ -45,20 +47,18 @@ class MotionTests(unittest.TestCase):
         position = self.view.roam_x
         self.view._roam_step(100.05)
         self.assertAlmostEqual(abs(self.view.roam_x - position), 7)
-        self.assertAlmostEqual(self.view.walk_time, .0325)
+        self.assertAlmostEqual(self.view.flight_phase, .05)
 
-    def test_walk_faces_its_direction_and_loops(self):
+    def test_flight_uses_reclining_pose_in_both_directions(self):
         self.view.roaming = True
-        self.view.walk_time = .4
         self.view.roam_dir = 1
         right = self.view._figure()
         self.view.roam_dir = -1
         left = self.view._figure()
-        self.assertEqual(left, avatar.flip_horizontal(right))
-        self.view.walk_time += 1.6
-        self.assertEqual(self.view._figure(), left)
+        self.assertEqual(left,right)
+        self.assertEqual(left,self.view.roam_img)
 
-    def test_stop_cancels_walking_and_spin(self):
+    def test_stop_cancels_flight_and_spin(self):
         with patch.object(self.view, "raise_"):
             self.view.start_roam()
         self.view.play_anim("spin")
@@ -83,9 +83,9 @@ class MotionTests(unittest.TestCase):
         self.assertTrue(self.view.isVisible())
 
     def test_direct_motion_commands_do_not_need_ai(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             actions = Actions({}, ".", None)
-        for command in ("походи", "походить", "ходи", "погуляй", "погулять", "пройдись", "пройтись"):
+        for command in ("полетай", "летай", "полети", "полетать", "походи", "походить", "ходи", "погуляй", "погулять", "пройдись", "пройтись"):
             with self.subTest(command=command):
                 self.assertEqual(actions.handle(command).action, "roam")
                 self.assertTrue(actions.is_fast_command(command))

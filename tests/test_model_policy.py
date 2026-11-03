@@ -2,10 +2,10 @@ import copy
 import unittest
 from unittest.mock import Mock, patch
 
-from local_ai import LocalAI
-import cancellation
-from model_policy import ConversationModels, game_window, game_running
-import main
+from capri.ai.model_selection import ConversationModels, game_running, game_window
+from capri.ai.providers.ollama_chat import LocalAI
+from capri.app import controller as main
+from capri.core import cancellation
 
 
 class GameDetectionTests(unittest.TestCase):
@@ -13,8 +13,8 @@ class GameDetectionTests(unittest.TestCase):
         models = ConversationModels({})
         installed = Mock(return_value=["qwen3:8b", "qwen3:1.7b"])
         rust = Mock(info={"name": "RustClient.exe", "exe": ""})
-        with patch("model_policy.psutil.process_iter", return_value=[rust]) as processes, \
-                patch("model_policy.foreground_game", return_value=False):
+        with patch("capri.ai.model_selection.psutil.process_iter", return_value=[rust]) as processes, \
+                patch("capri.ai.model_selection.foreground_game", return_value=False):
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
             processes.return_value = []
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:8b")
@@ -23,15 +23,15 @@ class GameDetectionTests(unittest.TestCase):
         for name, exe, extra in (
                 ("another.exe", r"D:\Steam\steamapps\common\Game\another.exe", ()),
                 ("custom.exe", "", {"custom.exe"})):
-            with patch("model_policy.psutil.process_iter", return_value=[Mock(info={"name": name, "exe": exe})]), \
-                    patch("model_policy.foreground_game", return_value=False):
+            with patch("capri.ai.model_selection.psutil.process_iter", return_value=[Mock(info={"name": name, "exe": exe})]), \
+                    patch("capri.ai.model_selection.foreground_game", return_value=False):
                 self.assertTrue(game_running(extra))
 
     def test_background_launchers_and_crash_helpers_do_not_keep_game_model(self):
         processes = [Mock(info={"name": name, "exe": "D:/Steam/steamapps/common/Game/" + name})
                      for name in ("steam.exe", "UnityCrashHandler64.exe", "crashpad_handler.exe")]
-        with patch("model_policy.psutil.process_iter", return_value=processes), \
-                patch("model_policy.foreground_game", return_value=False):
+        with patch("capri.ai.model_selection.psutil.process_iter", return_value=processes), \
+                patch("capri.ai.model_selection.foreground_game", return_value=False):
             self.assertFalse(game_running())
 
     def test_known_windowed_game_is_detected(self):
@@ -52,7 +52,7 @@ class ModelChoiceTests(unittest.TestCase):
     def test_temporary_ollama_failure_does_not_cache_missing_model_or_switch_to_heavy(self):
         models = ConversationModels({})
         installed = Mock(side_effect=[None, ["qwen3:8b", "qwen3:1.7b"]])
-        with patch("model_policy.game_running", return_value=True):
+        with patch("capri.ai.model_selection.game_running", return_value=True):
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
         self.assertEqual(installed.call_count, 2)
@@ -60,15 +60,15 @@ class ModelChoiceTests(unittest.TestCase):
     def test_game_uses_installed_light_model_and_desktop_uses_normal(self):
         models = ConversationModels({})
         installed = Mock(return_value=["qwen3:8b", "qwen3:1.7b", "qwen3:0.6b"])
-        with patch("model_policy.game_running", return_value=True):
+        with patch("capri.ai.model_selection.game_running", return_value=True):
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:1.7b")
         installed.assert_called_once()
-        with patch("model_policy.game_running", return_value=False):
+        with patch("capri.ai.model_selection.game_running", return_value=False):
             self.assertEqual(models.choose("qwen3:8b", installed), "qwen3:8b")
 
     def test_missing_game_model_uses_main_model_not_dispatcher(self):
-        with patch("model_policy.game_running", return_value=True):
+        with patch("capri.ai.model_selection.game_running", return_value=True):
             self.assertEqual(ConversationModels({}).choose("qwen3:8b", lambda: ["qwen3:8b", "qwen3:0.6b"]), "qwen3:8b")
 
     def test_model_released_only_when_actual_model_selection_changes(self):
@@ -81,7 +81,7 @@ class ModelChoiceTests(unittest.TestCase):
         self.assertEqual(release.call_count, 2)
 
     def test_disabled_policy_never_reads_foreground_or_changes_model(self):
-        with patch("model_policy.game_running") as foreground:
+        with patch("capri.ai.model_selection.game_running") as foreground:
             models = ConversationModels({"use_light_model_in_games": False})
             self.assertEqual(models.choose("qwen3:8b", Mock()), "qwen3:8b")
             foreground.assert_not_called()
@@ -104,9 +104,9 @@ class ModelChoiceTests(unittest.TestCase):
                 self.history.append({"role": "assistant", "content": "Ответ."})
                 return "Ответ."
         ai = TestAI({})
-        with patch("model_policy.game_running", return_value=True):
+        with patch("capri.ai.model_selection.game_running", return_value=True):
             self.assertEqual(capri._ask_ai(ai, "Вопрос", lambda: False), "Ответ.")
-        with patch("model_policy.game_running", return_value=False):
+        with patch("capri.ai.model_selection.game_running", return_value=False):
             self.assertEqual(capri._ask_ai(ai, "Другой вопрос", lambda: False), "Ответ.")
         self.assertEqual(observed, ["qwen3:1.7b", "qwen3:8b"])
         self.assertEqual(released, ["qwen3:8b", "qwen3:1.7b"])
@@ -120,7 +120,7 @@ class ModelChoiceTests(unittest.TestCase):
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             capri = main.Capri(cfg)
         capri.local = LocalAI({})
-        with patch("model_policy.game_running", return_value=True), \
+        with patch("capri.ai.model_selection.game_running", return_value=True), \
                 patch.object(LocalAI, "installed", return_value=["qwen3:8b", "qwen3:1.7b"]), \
                 patch.object(LocalAI, "release_model"), \
                 patch.object(LocalAI, "_chat", autospec=True, side_effect=lambda ai, *args, **kwargs: ai.model):

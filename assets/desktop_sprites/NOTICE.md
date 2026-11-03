@@ -8,3 +8,5 @@ See LICENSE.md in this folder. They are excluded from the root MIT license.
 The character and Cyberpunk universe remain the property of their respective rights holders.
 
 The Python interaction and playback implementation is written for Capri Reload.
+
+Additional sheets: talk_base.png (idle), talk_blink.png (blink), mouth.png, perch.png. Copyright 2026 Lachy. Source: https://github.com/lachydotmcg/capri-desktop · PolyForm Noncommercial 1.0.0.

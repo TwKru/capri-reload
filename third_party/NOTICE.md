@@ -27,3 +27,13 @@ See LICENSE-APACHE-2.0.txt for the code license.
 `misaki_espeak.py` contains the EspeakG2P class from hexgrad/misaki, revision fba1236595f2d2bf21d414ba6e57d25256afada3.
 Source: https://github.com/hexgrad/misaki . Apache-2.0 license: LICENSE-MISAKI.txt.
 Changes: omit the unused English fallback class; keep the non-English frontend only.
+
+
+## Optional Qwen3-TTS voice B
+
+Qwen3-TTS 0.6B by Qwen, Apache-2.0 (LICENSE-APACHE-2.0.txt).
+https://github.com/QwenLM/Qwen3-TTS
+Quantization: mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF, revision 0762b31e9cd99274d49dca4e895bd81863134f08.
+Native runtime: ggml-org/llama.cpp b12069, MIT (LICENSE-LLAMA-CPP.txt).
+The optional runtime, weights and private speaker recordings are installed separately, outside the application bundle.
+Layer processing uses Rubber Band in the existing imageio-ffmpeg distribution.

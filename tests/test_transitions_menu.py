@@ -1,16 +1,17 @@
 """Заставки завершаются один раз, а меню управляет теми же обработчиками."""
-import os
 import copy
-from pathlib import Path
+import os
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPoint, QPointF, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
-from transitions import ScreenTransition, chip_icon
-from control_menu import build_control_menu
+
+from capri.ui.startup_animation import ScreenTransition, chip_icon
+from capri.ui.tray_menu import build_control_menu
 
 
 class TransitionTests(unittest.TestCase):
@@ -69,6 +70,98 @@ class TransitionTests(unittest.TestCase):
         self.view.elapsed.elapsed.return_value = 2700
         self.view._tick()
         self.assertEqual(events, ["shutdown"])
+
+    def test_avatar_is_revealed_once_before_startup_finishes(self):
+        events=[]
+        self.view.revealed.connect(lambda:events.append("reveal"))
+        self.view.finished.connect(lambda mode:events.append(mode))
+        self.view.elapsed=Mock()
+        self.view.play("startup")
+        self.view.elapsed.elapsed.return_value=2700
+        self.view._tick()
+        self.assertEqual(events,[])
+        self.view.elapsed.elapsed.return_value=2800
+        self.view._tick();self.view._tick()
+        self.assertEqual(events,["reveal"])
+        self.view.elapsed.elapsed.return_value=3600
+        self.view._tick()
+        self.assertEqual(events,["reveal","startup"])
+
+    def test_shutdown_does_not_reveal_startup_avatar(self):
+        reveal=Mock()
+        self.view.revealed.connect(reveal)
+        self.view.elapsed=Mock()
+        self.view.play("startup")
+        self.view.play("shutdown")
+        self.view.elapsed.elapsed.return_value=2800
+        self.view._tick()
+        reveal.assert_not_called()
+
+    def test_startup_frames_are_deterministic_and_camera_moves(self):
+        self.assertEqual(self.frame("startup",.65),self.frame("startup",.65))
+        self.assertNotEqual(self.frame("startup",.25),self.frame("startup",.65))
+        self.assertNotEqual(self.frame("startup",1.12),self.frame("startup",1.4))
+
+    def test_startup_supports_portrait_ultrawide_and_multiple_screens(self):
+        for width,height in ((360,800),(2560,720),(3200,1080)):
+            with self.subTest(size=(width,height)):
+                self.view.resize(width,height)
+                self.view.head_center=QPointF(min(960,width/2),height/2)
+                covered=self.frame("startup",2.)
+                clear=self.frame("startup",3.59)
+                for x,y in ((0,0),(width-1,0),(width-1,height-1),(0,height-1)):
+                    self.assertEqual(covered.pixelColor(x,y),QColor("#ff224c"))
+                    self.assertEqual(clear.pixelColor(x,y).alpha(),0)
+
+    def test_eye_flight_finishes_inside_iris_for_all_screen_shapes(self):
+        from capri.ui.neural_head import IRIS_RADIUS
+        from capri.ui.startup_scene import eye_flight
+        for width,height in ((960,540),(360,800),(3200,1080)):
+            viewport=QRectF(0,0,width,height)
+            center=QPointF(min(960,width/2),height/2)
+            base=max(.45,min(width/760,height/620,1.75))*1.035
+            previous=1.
+            for t in (1.08,1.25,1.5,1.75,1.96):
+                progress,zoom,aim=eye_flight(viewport,center,base,t)
+                self.assertGreaterEqual(zoom,previous)
+                previous=zoom
+            self.assertEqual(progress,1.)
+            self.assertEqual(aim,center)
+            radius=zoom*base*IRIS_RADIUS
+            for x,y in ((0,0),(width,0),(0,height),(width,height)):
+                self.assertGreaterEqual(radius,((x-center.x())**2+(y-center.y())**2)**.5)
+
+    def test_camera_targets_red_iris_before_full_screen_cover(self):
+        for t in (1.52,1.65):
+            self.assertEqual(self.frame("startup",t).pixelColor(480,270),QColor("#ff224c"))
+
+    def test_shutdown_fall_has_anticipation_acceleration_and_clears_screen(self):
+        from capri.ui.shutdown_scene import falling_avatar_rect
+        viewport=QRectF(0,0,960,540)
+        initial=QRectF(30,120,340,380)
+        self.assertEqual(falling_avatar_rect(viewport,initial,0),initial)
+        self.assertLess(falling_avatar_rect(viewport,initial,.8).top(),initial.top())
+        early=falling_avatar_rect(viewport,initial,1.4).top()-falling_avatar_rect(viewport,initial,1.2).top()
+        late=falling_avatar_rect(viewport,initial,1.6).top()-falling_avatar_rect(viewport,initial,1.4).top()
+        self.assertGreater(late,early)
+        for scale in (.5,1.,1.6):
+            rect=QRectF(30,-100,340*scale,380*scale)
+            self.assertGreater(falling_avatar_rect(viewport,rect,2.5).top(),viewport.bottom())
+
+    def test_shutdown_keeps_current_avatar_scale(self):
+        image=QImage(40,40,QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("#00ff00"))
+        avatar=Mock(scale_factor=1.35)
+        avatar._figure.return_value=image
+        avatar.pos.return_value=QPoint(120,80)
+        avatar.isVisible.return_value=True
+        self.view.play("shutdown",avatar)
+        self.assertEqual(self.frame("shutdown",0).pixelColor(560,100),QColor("#00ff00"))
+
+    def test_shutdown_has_deterministic_frames_and_fully_transparent_ending(self):
+        self.assertEqual(self.frame("shutdown",.8),self.frame("shutdown",.8))
+        image=self.frame("shutdown",2.59)
+        self.assertTrue(all(image.pixelColor(x,y).alpha()==0 for x,y in ((0,0),(480,270),(959,539))))
 
     def test_chip_icon_is_available_at_tray_sizes(self):
         icon = chip_icon()
@@ -138,8 +231,8 @@ class ControlMenuTests(unittest.TestCase):
 
 class LifecycleIntegrationTests(unittest.TestCase):
     def test_main_starts_after_intro_and_all_exits_wait_for_outro(self):
-        import main
-        from avatar import Avatar
+        from capri.app import controller as main
+        from capri.desktop.avatar import Avatar
         app = QApplication.instance() or QApplication([])
         avatar = Avatar(str(Path(__file__).resolve().parents[1] / "assets"))
         transition = ScreenTransition()
@@ -156,6 +249,9 @@ class LifecycleIntegrationTests(unittest.TestCase):
         def event_loop():
             capri.start.assert_not_called()
             self.assertEqual(transition.mode, "startup")
+            transition.revealed.emit()
+            self.assertTrue(avatar.isVisible())
+            capri.start.assert_not_called()
             transition.finished.emit("startup")
             capri.start.assert_called_once()
             # Голосовой выход использует тот же обработчик, что пункт меню.
@@ -172,10 +268,11 @@ class LifecycleIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(tray.setContextMenu.call_args_list[0].args[0])
             self.assertIsNone(tray.setContextMenu.call_args.args[0])
             return 0
-        with patch.object(main, "QApplication", return_value=app), patch.object(main, "Avatar", return_value=avatar), \
-                patch.object(main, "Capri", return_value=capri), patch.object(main, "ScreenTransition", return_value=transition), \
-                patch.object(main, "QSystemTrayIcon", return_value=tray), patch.object(main, "load_config", return_value=cfg), \
+        from capri.app import windows_application as application
+        with patch("capri.app.runtime_services.RuntimeServices"), patch.object(application, "QApplication", return_value=app), patch.object(application, "Avatar", return_value=avatar), \
+                patch.object(application, "Capri", return_value=capri), patch.object(application, "ScreenTransition", return_value=transition), \
+                patch.object(application, "QSystemTrayIcon", return_value=tray), patch.object(application, "load_config", return_value=cfg), \
                 patch.object(app, "quit"), patch.object(app, "exec", side_effect=event_loop), \
                 self.assertRaises(SystemExit) as stopped:
-            main.main()
+            application.main()
         self.assertEqual(stopped.exception.code, 0)

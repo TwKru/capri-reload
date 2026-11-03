@@ -1,14 +1,14 @@
 """Обновления: свой репозиторий, личные файлы, обход путей и откат."""
 import io
 import json
-from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 import zipfile
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-import updater
-from actions import Actions
+from capri.automation.command_dispatcher import Actions
+from capri.updates import source_updater as updater
 
 
 class UpdaterTests(unittest.TestCase):
@@ -25,11 +25,11 @@ class UpdaterTests(unittest.TestCase):
 
     def test_version_and_download_use_only_user_repository(self):
         data = json.dumps({"object": {"sha": self.sha}}).encode()
-        with patch("updater.urllib.request.urlopen", return_value=io.BytesIO(data)) as request:
+        with patch("capri.updates.source_updater.urllib.request.urlopen", return_value=io.BytesIO(data)) as request:
             self.assertEqual(updater.latest_version(), self.sha)
         self.assertEqual(request.call_args.args[0].full_url,
                          "https://api.github.com/repos/TwKru/capri-reload/git/ref/heads/main")
-        with patch("updater.urllib.request.urlopen", return_value=io.BytesIO(b"archive")) as request:
+        with patch("capri.updates.source_updater.urllib.request.urlopen", return_value=io.BytesIO(b"archive")) as request:
             updater.download(self.sha, self.root / "download.zip")
         self.assertEqual(request.call_args.args[0].full_url,
                          "https://codeload.github.com/TwKru/capri-reload/zip/" + self.sha)
@@ -60,7 +60,7 @@ class UpdaterTests(unittest.TestCase):
             if len(calls) == 2:
                 raise OSError("Disk full")
             return original_copy(source, destination)
-        with patch("updater._atomic_copy", side_effect=fail), self.assertRaises(OSError):
+        with patch("capri.updates.source_updater._atomic_copy", side_effect=fail), self.assertRaises(OSError):
             updater.install(self.staged, self.base, self.sha)
         self.assertEqual((self.base / "main.py").read_text(), "old = True\n")
         self.assertFalse((self.base / "module.py").exists())
@@ -111,12 +111,12 @@ class UpdaterTests(unittest.TestCase):
         other.terminate.assert_not_called()
 
     def test_update_voice_command_does_not_install_in_worker(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, str(self.base), None)
-        with patch("actions.updater.start_update") as start:
+        with patch("capri.automation.command_dispatcher.updater.start_update") as start:
             self.assertEqual(app.handle("обновись").action, "update")
             start.assert_not_called()
-        with patch("actions.updater.latest_version", return_value=self.sha):
+        with patch("capri.automation.command_dispatcher.updater.latest_version", return_value=self.sha):
             reply = app.handle("проверь обновления")
         self.assertIn(self.sha[:7], reply.text)
 

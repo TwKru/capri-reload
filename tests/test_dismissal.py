@@ -1,6 +1,6 @@
 import unittest
 
-from dismissal import dismissal_hint
+from capri.ai.persona.dismissal_intent import dismissal_hint
 
 
 class DismissalTests(unittest.TestCase):

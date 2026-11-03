@@ -3,21 +3,26 @@ import copy
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 import urllib.error
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QLineEdit
-import cancellation
-import main
-from ai_dialog import AIDialog
-from gemini_ai import DEFAULT_GEMINI_MODEL, Gemini, GeminiClient
-from intent_router import IntentRouter, COMMAND_SCHEMA
-from memory import MemoryStore
-from openai_ai import APIError
+
+from capri.ai.intent_router import COMMAND_SCHEMA, IntentRouter
+from capri.ai.providers.gemini_provider import (
+    DEFAULT_GEMINI_MODEL,
+    Gemini,
+    GeminiClient,
+)
+from capri.ai.providers.openai_provider import APIError
+from capri.app import controller as main
+from capri.core import cancellation
+from capri.storage.conversation_memory import MemoryStore
+from capri.ui.dialogs.ai_settings import AIDialog
 
 
 def response(text="Ответ.", reason="STOP", thought=False):
@@ -36,7 +41,7 @@ class GeminiClientTests(unittest.TestCase):
         client = GeminiClient(self.cfg)
         messages = [{"role": "system", "content": "Инструкция"}, {"role": "user", "content": "Привет"},
                     {"role": "assistant", "content": "Привет!"}, {"role": "user", "content": "Вопрос"}]
-        with patch("cancellation.urllib.request.urlopen", return_value=response(thought=True)) as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response(thought=True)) as request:
             self.assertEqual(client.complete(messages, tokens=160), "Ответ.")
         sent = request.call_args.args[0]
         self.assertEqual(sent.full_url, f"https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_GEMINI_MODEL}:generateContent")
@@ -52,12 +57,12 @@ class GeminiClientTests(unittest.TestCase):
     def test_router_uses_google_json_schema_and_keeps_question_guard(self):
         router = IntentRouter(self.cfg)
         decision = {"action": "music", "target": "", "value": None, "relative": False}
-        with patch("cancellation.urllib.request.urlopen", return_value=response(json.dumps(decision))) as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response(json.dumps(decision))) as request:
             self.assertEqual(router.ask("Как выключить компьютер?").action, "chat")
         config = json.loads(request.call_args.args[0].data)["generationConfig"]
         self.assertEqual(config["responseMimeType"], "application/json")
         self.assertEqual(config["responseJsonSchema"], COMMAND_SCHEMA)
-        with patch("cancellation.urllib.request.urlopen") as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen") as request:
             router.warmup()
             request.assert_not_called()
 
@@ -79,7 +84,7 @@ class GeminiClientTests(unittest.TestCase):
     def test_missing_key_and_bad_model_do_not_make_network_requests(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}):
             ai = Gemini({})
-        with patch("cancellation.urllib.request.urlopen") as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen") as request:
             self.assertIn("ключ Google", ai.ask("Вопрос"))
             client = GeminiClient(dict(self.cfg, gemini_model="https://another-server/"))
             with self.assertRaises(APIError):
@@ -91,7 +96,7 @@ class GeminiClientTests(unittest.TestCase):
         for status in (400, 401, 403, 404, 429, 500):
             error = urllib.error.HTTPError("https://generativelanguage.googleapis.com", status,
                 "fake-google-key", {}, io.BytesIO(b"fake-google-key"))
-            with patch("cancellation.urllib.request.urlopen", side_effect=error):
+            with patch("capri.core.cancellation.urllib.request.urlopen", side_effect=error):
                 text = ai.ask("Вопрос")
             self.assertNotIn("fake-google-key", text)
             self.assertEqual(ai.history, [])
@@ -101,16 +106,33 @@ class GeminiClientTests(unittest.TestCase):
         for body in (json.dumps({"promptFeedback": {"blockReason": "SAFETY"}}).encode(),
                      response("", "STOP").getvalue(), response("Ответ", "SAFETY").getvalue()):
             ai = Gemini(self.cfg)
-            with patch("cancellation.urllib.request.urlopen", return_value=io.BytesIO(body)):
+            with patch("capri.core.cancellation.urllib.request.urlopen", return_value=io.BytesIO(body)):
                 ai.ask("Вопрос")
             self.assertEqual(ai.history, [])
 
+    def test_http_400_distinguishes_region_from_invalid_key_without_echoing_secrets(self):
+        for message, reason, expected in (
+            ("User location is not supported for the API use.", "", "регионе"),
+            ("API key not valid. fake-google-key", "API_KEY_INVALID", "API-ключ"),
+            ("Gemini API free tier is not available in your country.", "", "Бесплатный"),
+            ("Your API key was reported as leaked. fake-google-key", "", "скомпрометированный"),
+        ):
+            ai = Gemini(self.cfg)
+            body = {"error":{"message":message,"details":[{"reason":reason}]}}
+            error = urllib.error.HTTPError("https://generativelanguage.googleapis.com",400,"Bad Request",{},
+                                           io.BytesIO(json.dumps(body).encode()))
+            with patch("capri.core.cancellation.urllib.request.urlopen",side_effect=error):
+                text = ai.ask("Question")
+            self.assertIn(expected,text)
+            self.assertNotIn("fake-google-key",text)
+            self.assertEqual(ai.history,[])
+
     def test_limited_output_does_not_retry_or_return_broken_json(self):
         client = GeminiClient(self.cfg)
-        with patch("cancellation.urllib.request.urlopen", return_value=response("Ответ. Оборванная фраза", "MAX_TOKENS")) as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response("Ответ. Оборванная фраза", "MAX_TOKENS")) as request:
             self.assertEqual(client.complete([{"role": "user", "content": "Вопрос"}]), "Ответ.")
         request.assert_called_once()
-        with patch("cancellation.urllib.request.urlopen", return_value=response('{"action":', "MAX_TOKENS")), self.assertRaises(APIError):
+        with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response('{"action":', "MAX_TOKENS")), self.assertRaises(APIError):
             client.complete([{"role": "user", "content": "Вопрос"}], schema=COMMAND_SCHEMA)
 
     def test_cancelled_response_does_not_commit_history(self):
@@ -119,7 +141,7 @@ class GeminiClientTests(unittest.TestCase):
         def cancel(*args, **kwargs):
             scope.cancel()
             return response()
-        with scope.bind(), patch("cancellation.urllib.request.urlopen", side_effect=cancel), self.assertRaises(cancellation.RequestCancelled):
+        with scope.bind(), patch("capri.core.cancellation.urllib.request.urlopen", side_effect=cancel), self.assertRaises(cancellation.RequestCancelled):
             ai.ask("Вопрос")
         self.assertEqual(ai.history, [])
 
@@ -132,16 +154,16 @@ class GeminiIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.cfg = copy.deepcopy(main.DEFAULTS)
         self.cfg.update(ai_mode="gemini", gemini_api_key="fake-google-key", openai_api_key="fake-openai-key")
-        sound = patch("main.stop_sound")
+        sound = patch("capri.app.controller.stop_sound")
         sound.start()
         self.addCleanup(sound.stop)
 
     def make_capri(self):
-        with patch("main.Actions"), patch("main.Speaker"), patch("main.make_glitch_sound"):
+        with patch("capri.app.controller.Actions"), patch("capri.app.controller.Speaker"), patch("capri.app.controller.make_glitch_sound"):
             return main.Capri(copy.deepcopy(self.cfg))
 
     def test_gemini_mode_does_not_create_or_warm_local_models(self):
-        with patch("main.LocalAI") as local, patch("main.AI") as claude, patch("main.OpenAI") as openai:
+        with patch("capri.app.controller.LocalAI") as local, patch("capri.app.controller.AI") as claude, patch("capri.app.controller.OpenAI") as openai:
             capri = self.make_capri()
             capri._background = Mock()
             capri._start_models()
@@ -159,7 +181,7 @@ class GeminiIntegrationTests(unittest.TestCase):
         capri.actions.handle_conversation.return_value = None
         capri.reload_config_if_changed = Mock()
         capri.say = Mock(return_value=False)
-        with patch("cancellation.urllib.request.urlopen", return_value=response()) as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response()) as request:
             capri.text_command("Почему небо голубое?")
             capri._process(capri.jobs.get_nowait())
         self.assertEqual(request.call_count, 1)
@@ -168,7 +190,7 @@ class GeminiIntegrationTests(unittest.TestCase):
 
     def test_missing_key_does_not_start_local_fallback(self):
         self.cfg["gemini_api_key"] = ""
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}), patch("main.LocalAI") as local:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}), patch("capri.app.controller.LocalAI") as local:
             capri = self.make_capri()
             capri._start_models()
             local.assert_not_called()
@@ -176,7 +198,7 @@ class GeminiIntegrationTests(unittest.TestCase):
         capri.actions.handle_conversation.return_value = None
         capri.reload_config_if_changed = Mock()
         capri.say = Mock(return_value=False)
-        with patch("cancellation.urllib.request.urlopen") as request:
+        with patch("capri.core.cancellation.urllib.request.urlopen") as request:
             capri.text_command("Объясни гравитацию")
             capri._process(capri.jobs.get_nowait())
             request.assert_not_called()
@@ -191,7 +213,7 @@ class GeminiIntegrationTests(unittest.TestCase):
             memory_path = Path(directory) / "memory.json"
             capri.enable_memory(memory_path)
             capri.memory.record("Вопрос", "Ответ.")
-            with patch("main.CONFIG_PATH", str(cfg_path)), patch("main.LocalAI") as local:
+            with patch("capri.config.settings.CONFIG_PATH", str(cfg_path)), patch("capri.app.controller.LocalAI") as local:
                 capri.set_ai_settings("gemini", "new-google-key", DEFAULT_GEMINI_MODEL)
                 self.assertEqual(capri.cfg["openai_api_key"], "fake-openai-key")
                 self.assertEqual(capri.ai.history[-1]["content"], "Ответ.")
@@ -207,7 +229,7 @@ class GeminiIntegrationTests(unittest.TestCase):
             path = Path(directory) / "memory.json"
             capri.enable_memory(path)
             capri.memory.remember("моего кота зовут Барсик")
-            with patch("cancellation.urllib.request.urlopen", return_value=response("Твоего кота зовут Барсик.")) as request:
+            with patch("capri.core.cancellation.urllib.request.urlopen", return_value=response("Твоего кота зовут Барсик.")) as request:
                 capri._ask_ai(capri.ai, "Как зовут моего кота?", lambda: False)
             body = json.loads(request.call_args.args[0].data)
             self.assertIn("Барсик", body["systemInstruction"]["parts"][0]["text"])

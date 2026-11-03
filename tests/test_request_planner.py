@@ -4,11 +4,10 @@ import string
 import unittest
 from unittest.mock import patch
 
-from action_replies import ACTION_REPLIES
-from intent_router import COMMAND_SCHEMA, IntentRouter
-from request_planner import RequestPlan, compact_sources, fallback_plan
-import persona
-
+from capri.ai.intent_router import COMMAND_SCHEMA, IntentRouter
+from capri.ai.persona import system_prompts as persona
+from capri.ai.persona.action_responses import ACTION_REPLIES
+from capri.ai.request_planner import RequestPlan, compact_sources, fallback_plan
 
 SOURCES = [{"title": "Прогноз", "url": "https://example.org/", "text": "Сейчас минус 5 градусов. Завтра будет снег."}]
 
@@ -24,7 +23,7 @@ class PlanTests(unittest.TestCase):
     def test_second_stage_really_calls_mini_model_for_local_and_web(self):
         for route, question, query in (("local", "Почему небо голубое?", ""),
                                        ("web", "Погода в Краснообске", "погода в Краснообске сейчас")):
-            with patch("intent_router.urllib.request.urlopen", return_value=response(
+            with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=response(
                     {"route": route, "complexity": "simple", "query": query})) as call:
                 plan = IntentRouter({}).assess(question)
             self.assertEqual(plan.route, route)
@@ -33,19 +32,19 @@ class PlanTests(unittest.TestCase):
             self.assertIn(question, payload["messages"][-1]["content"])
 
     def test_social_text_cannot_become_web_even_if_model_mistakes(self):
-        with patch("intent_router.urllib.request.urlopen", return_value=response(
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=response(
                 {"route": "web", "complexity": "simple", "query": "фильм Давай поговорим"})):
             self.assertEqual(IntentRouter({}).assess("давай поговорим").route, "local")
 
     def test_explicit_weather_cannot_be_lost_by_wrong_local_assessment(self):
-        with patch("intent_router.urllib.request.urlopen", return_value=response(
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=response(
                 {"route": "local", "complexity": "simple", "query": ""})):
             plan = IntentRouter({}).assess("Какая погода в Краснообске?")
         self.assertEqual(plan.route, "web")
         self.assertIn("Краснообске", plan.query)
 
     def test_currency_quote_needs_web_but_definition_does_not(self):
-        with patch("intent_router.urllib.request.urlopen", return_value=response(
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=response(
                 {"route": "local", "complexity": "simple", "query": ""})):
             self.assertEqual(IntentRouter({}).assess("Какой курс доллара сегодня?").route, "web")
         self.assertEqual(fallback_plan("Что такое курс доллара?").route, "local")
@@ -57,7 +56,7 @@ class PlanTests(unittest.TestCase):
                      {"route": "local", "complexity": "simple", "query": "", "shell": "cmd"}):
             with self.assertRaises(ValueError):
                 RequestPlan.parse(data)
-        with patch("intent_router.urllib.request.urlopen", side_effect=TimeoutError):
+        with patch("capri.ai.intent_router.urllib.request.urlopen", side_effect=TimeoutError):
             self.assertIsNone(IntentRouter({}).assess("Простой вопрос"))
         self.assertEqual(fallback_plan("давай поговорим").route, "local")
         self.assertEqual(fallback_plan("погода в Краснообске").route, "web")
@@ -73,7 +72,7 @@ class PlanTests(unittest.TestCase):
 
     def test_compression_accepts_only_exact_source_quotes(self):
         selected = {"keep": [0]}
-        with patch("intent_router.urllib.request.urlopen", return_value=response(selected)):
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=response(selected)):
             result = IntentRouter({}).compress({"question": "Какая погода?", "sources": SOURCES})
         self.assertEqual(result[0]["text"], "Сейчас минус 5 градусов.")
         self.assertEqual(result[0]["url"], SOURCES[0]["url"])
@@ -109,7 +108,7 @@ class ScriptedBankTests(unittest.TestCase):
     def test_random_selection_reaches_all_ten_variants_and_keeps_volume(self):
         replies = []
         for index in range(10):
-            with patch("persona.random.choice", side_effect=lambda values, i=index: values[i]):
+            with patch("capri.ai.persona.system_prompts.random.choice", side_effect=lambda values, i=index: values[i]):
                 replies.append(persona.line("vol_set", n=37))
         self.assertEqual(len(set(replies)), 10)
         self.assertTrue(all("37" in reply for reply in replies))

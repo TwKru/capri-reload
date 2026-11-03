@@ -1,13 +1,18 @@
 """Интернет даёт только имена; действия выполняются только над найденными локальными программами."""
 import json
-from pathlib import Path
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-from actions import Actions, Reply
-from program_lookup import ProgramLookup, abbreviation_spellings, name_key, steam_games
+from capri.automation.application_search import (
+    ProgramLookup,
+    abbreviation_spellings,
+    name_key,
+    steam_games,
+)
+from capri.automation.command_dispatcher import Actions, Reply
 
 
 class LookupTests(unittest.TestCase):
@@ -68,7 +73,7 @@ class LookupTests(unittest.TestCase):
 
 class WebAppCommandTests(unittest.TestCase):
     def setUp(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.app = Actions({"web_app_lookup": True}, ".", None)
         self.lookup = Mock()
         self.lookup.resolve.return_value = ["Counter-Strike 2"]
@@ -79,10 +84,10 @@ class WebAppCommandTests(unittest.TestCase):
             Process=types.SimpleNamespace(name=lambda: "game64.exe", exe=lambda: "game64.exe"),
             DisplayName="Counter-Strike 2", SimpleAudioVolume=self.volume)]
         for replacement in (patch("pycaw.pycaw.AudioUtilities.GetAllSessions", return_value=self.sessions),
-                            patch("actions.file_description", return_value="")):
+                            patch("capri.automation.command_dispatcher.file_description", return_value="")):
             replacement.start()
             self.addCleanup(replacement.stop)
-        self.endpoint_patch = patch("actions._endpoint")
+        self.endpoint_patch = patch("capri.automation.command_dispatcher._endpoint")
         self.endpoint = self.endpoint_patch.start()
         self.addCleanup(self.endpoint_patch.stop)
 
@@ -138,7 +143,7 @@ class WebAppCommandTests(unittest.TestCase):
     def test_open_matches_online_name_only_to_installed_entry(self):
         self.app.index.ready.set()
         self.app.index.items = {"counter-strike 2": ("file", "registered-shortcut.lnk")}
-        with patch("actions.find_folder", return_value=None), \
+        with patch("capri.automation.command_dispatcher.find_folder", return_value=None), \
                 patch.object(self.app.index, "launch_best", return_value="counter-strike 2") as launch:
             self.app.handle("открой cs2")
         launch.assert_called_once_with("cs2", [(1.0, "counter-strike 2", ("file", "registered-shortcut.lnk"))])
@@ -148,15 +153,15 @@ class WebAppCommandTests(unittest.TestCase):
         process.pid = 98765
         process.info = {"name": "game64.exe", "username": "test", "exe": "game64.exe"}
         self.app.index.ready.set()
-        with patch("actions.psutil.Process") as current, patch("actions.psutil.process_iter", return_value=[process]), \
-                patch("actions.file_description", return_value="Counter-Strike 2"), \
+        with patch("capri.automation.command_dispatcher.psutil.Process") as current, patch("capri.automation.command_dispatcher.psutil.process_iter", return_value=[process]), \
+                patch("capri.automation.command_dispatcher.file_description", return_value="Counter-Strike 2"), \
                 patch.object(self.app, "_kill", return_value=Reply("Закрыла.")) as kill:
             current.return_value.username.return_value = "test"
             self.app.handle("закрой cs2")
         kill.assert_called_once_with("game64", [process], False)
         process.info["name"] = "explorer.exe"
-        with patch("actions.psutil.Process") as current, patch("actions.psutil.process_iter", return_value=[process]), \
-                patch("actions.file_description", return_value="Counter-Strike 2"), patch.object(self.app, "_kill") as kill:
+        with patch("capri.automation.command_dispatcher.psutil.Process") as current, patch("capri.automation.command_dispatcher.psutil.process_iter", return_value=[process]), \
+                patch("capri.automation.command_dispatcher.file_description", return_value="Counter-Strike 2"), patch.object(self.app, "_kill") as kill:
             current.return_value.username.return_value = "test"
             self.app.handle("закрой cs2")
         kill.assert_not_called()

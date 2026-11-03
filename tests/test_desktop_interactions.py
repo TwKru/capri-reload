@@ -1,15 +1,16 @@
 """Imported clips stay bounded; mouse gestures and sleep do not block voice commands."""
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPointF, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
-import avatar  # noqa: E402
-from actions import Actions  # noqa: E402
+
+from capri.automation.command_dispatcher import Actions  # noqa: E402
+from capri.desktop import avatar  # noqa: E402
 
 
 class DesktopInteractionTests(unittest.TestCase):
@@ -34,13 +35,14 @@ class DesktopInteractionTests(unittest.TestCase):
             frames = self.view.anims["desktop_" + name]
             for index in range(len(frames)):
                 self.assertFalse(frames[index].isNull())
-                self.assertLessEqual(len(frames.strips), 1)
+                self.assertLessEqual(len(frames.strips), 4)
                 self.assertLessEqual(len(frames.cache), 8)
         self.assertNotEqual(self.view.anims["desktop_sleep"][0], self.view.anims["desktop_wake"][4])
 
-    def test_imported_standing_loops_are_not_loaded(self):
+    def test_standing_speech_clips_do_not_replace_default_lying_pose(self):
         self.assertNotIn("desktop_idle", self.view.anims)
-        self.assertNotIn("desktop_blink", self.view.anims)
+        self.assertIn("desktop_blink", self.view.anims)
+        self.assertIn("desktop_talk", self.view.anims)
         folder = self.assets / "desktop_sprites"
         self.assertFalse((folder / "idle.png").exists())
         self.assertFalse((folder / "blink.png").exists())
@@ -99,18 +101,19 @@ class DesktopInteractionTests(unittest.TestCase):
         self.view.idle_started = 100
         for mode in ("idle", "listening"):
             self.view.set_mode(mode)
-            with patch("avatar.time.time", return_value=100):
+            with patch("capri.desktop.avatar.time.time", return_value=100):
                 self.assertEqual(self.view._figure(), self.view.roam_img)
             self.assertFalse(self.view.sleeping)
         self.view.set_mode("thinking")
         self.assertEqual(self.view.anim, "eyes")
         self.view.set_mode("speaking")
-        with patch("avatar.time.time", return_value=100):
-            self.assertEqual(self.view._figure(), self.view.base)
+        with patch("capri.desktop.avatar.time.time", return_value=100):
+            self.assertNotEqual(self.view._figure(), self.view.base)
+            self.assertFalse(self.view._figure().isNull())
 
     def test_reclining_pose_allows_explicit_dance(self):
         first = self.view._figure()
-        with patch("avatar.time.time", return_value=avatar.time.time() + 3):
+        with patch("capri.desktop.avatar.time.time", return_value=avatar.time.time() + 3):
             self.assertEqual(self.view._figure(), first)
         self.view.play_anim("dance")
         self.view.tick()
@@ -136,9 +139,25 @@ class DesktopInteractionTests(unittest.TestCase):
         self.assertTrue(rect.contains(self.view.pos()))
 
     def test_new_commands_use_local_handlers(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             actions = Actions({}, ".", None)
         for command, animation in (("поспи", "sleep"), ("ложись спать", "sleep"),
                                    ("проснись", "wake"), ("танцуй", "dance")):
             self.assertEqual(actions.handle(command).action, "anim:" + animation)
             self.assertTrue(actions.is_fast_command(command))
+
+    def test_giant_scale_random_spot_and_named_movement_fit_screen(self):
+        self.view.set_scale(1.6)
+        rect = QApplication.primaryScreen().availableGeometry()
+        self.assertLessEqual(self.view.height(),rect.height())
+        self.assertLessEqual(self.view.width(),rect.width())
+        for _ in range(10):
+            spot = self.view._random_spot()
+            self.assertGreaterEqual(spot.x(),rect.left())
+            self.assertGreaterEqual(spot.y(),rect.top())
+            self.assertLessEqual(spot.x()+self.view.width()-1,rect.right())
+            self.assertLessEqual(spot.y()+self.view.height()-1,rect.bottom())
+        self.view.state = "hidden"
+        self.view.move_to_named("bottom-right")
+        self.assertLessEqual(self.view.x()+self.view.width()-1,rect.right())
+        self.assertLessEqual(self.view.y()+self.view.height()-1,rect.bottom())

@@ -1,8 +1,8 @@
 """Общая тема не перекрывает поля, закрытие не сохраняет настройки."""
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,12 +11,17 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-import main
-from ai_dialog import AIDialog
-from profile_dialog import ProfileDialog
-from sound_dialog import SoundDialog
-from entries_dialog import EntriesDialog, SiteForm, ReplyForm
-from theme import CyberFileDialog, CyberInputDialog, CyberMessageBox, apply_theme
+from capri.app import controller as main
+from capri.ui.dialogs.ai_settings import AIDialog
+from capri.ui.dialogs.app_shortcuts import EntriesDialog, ReplyForm, SiteForm
+from capri.ui.dialogs.audio_settings import SoundDialog
+from capri.ui.dialogs.user_profile import ProfileDialog
+from capri.ui.theme import (
+    CyberFileDialog,
+    CyberInputDialog,
+    CyberMessageBox,
+    apply_theme,
+)
 
 
 class ThemeTests(unittest.TestCase):

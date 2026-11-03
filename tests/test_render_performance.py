@@ -1,18 +1,19 @@
 """Ограниченный кэш кадров, повторное использование текста и совместный синтез фразы."""
-from concurrent.futures import ThreadPoolExecutor
 import os
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QRectF  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QStaticText  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
-import avatar  # noqa: E402
-import voice  # noqa: E402
+
+from capri.audio import voice_service as voice  # noqa: E402
+from capri.desktop import avatar  # noqa: E402
 
 
 class RenderCacheTests(unittest.TestCase):
@@ -53,13 +54,13 @@ class RenderCacheTests(unittest.TestCase):
         self.assertEqual(avatar.load_anims(str(self.root)), {})
 
     def test_subtitle_layout_is_reused_and_refreshes_on_text_change(self):
-        with patch("avatar.load_anims", return_value={}):
+        with patch("capri.desktop.avatar.load_anims", return_value={}):
             view = avatar.Avatar(str(self.root))
         self.addCleanup(view.close)
         self.addCleanup(view.overlay.close)
         rect = QRectF(16, 410, 308, 74)
         view.set_subtitle("Длинный ответ. " * 200)
-        with patch("avatar.QStaticText", wraps=QStaticText) as layout:
+        with patch("capri.desktop.avatar.QStaticText", wraps=QStaticText) as layout:
             font, text = view._prepare_subtitle(rect)
             count = layout.call_count
             for _ in range(20):
@@ -104,7 +105,7 @@ class RenderCacheTests(unittest.TestCase):
 
 class SharedSpeechTests(unittest.TestCase):
     def test_concurrent_requests_for_same_phrase_synthesize_once(self):
-        with tempfile.TemporaryDirectory() as folder, patch("voice.TTS_CACHE", folder):
+        with tempfile.TemporaryDirectory() as folder, patch("capri.audio.voice_service.TTS_CACHE", folder):
             speaker = voice.Speaker({})
             entered, release = threading.Event(), threading.Event()
             def render(text, destination):
@@ -124,8 +125,8 @@ class SharedSpeechTests(unittest.TestCase):
                 self.assertEqual(Path(path).read_bytes(), b"complete audio")
 
     def test_cache_cleanup_does_not_remove_in_progress_synthesis(self):
-        with tempfile.TemporaryDirectory() as folder, patch("voice.TTS_CACHE", folder), \
-                patch("voice.CACHE_MAX_FILES", 1):
+        with tempfile.TemporaryDirectory() as folder, patch("capri.audio.voice_service.TTS_CACHE", folder), \
+                patch("capri.audio.voice_service.CACHE_MAX_FILES", 1):
             staging = Path(folder) / "in-progress.tmp"
             staging.write_bytes(b"partial")
             for index in range(4):

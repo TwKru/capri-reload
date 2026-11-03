@@ -1,16 +1,16 @@
 """Регрессии: недоверенные ссылки, архивы, модель и сбои звукового устройства."""
 import hashlib
-from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 import zipfile
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-from actions import Actions
-from intent_router import Decision
-from tools import download_model
-import updater
-import voice
+from capri.ai.intent_router import Decision
+from capri.audio import voice_service as voice
+from capri.automation.command_dispatcher import Actions
+from capri.updates import source_updater as updater
+from tools import install_vosk_model as download_model
 
 
 class SecurityTests(unittest.TestCase):
@@ -18,20 +18,20 @@ class SecurityTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.app = Actions({}, str(self.root), None)
 
     def test_browser_rejects_executable_schemes_and_control_characters(self):
         for url in ("javascript:alert(1)", "file:///C:/Windows/cmd.exe", "ms-msdt:/id", "--app=http://example.com",
                     "https://user:pass@example.com", "https://example.com\n--flag"):
-            with self.subTest(url=url), patch("actions.subprocess.Popen") as start, \
-                    patch("actions.webbrowser.open") as browser, self.assertRaises(ValueError):
+            with self.subTest(url=url), patch("capri.automation.command_dispatcher.subprocess.Popen") as start, \
+                    patch("capri.automation.command_dispatcher.webbrowser.open") as browser, self.assertRaises(ValueError):
                 self.app.web(url)
             start.assert_not_called()
             browser.assert_not_called()
 
     def test_custom_app_fallback_never_uses_command_shell(self):
-        with patch("actions.os.startfile", side_effect=OSError), patch("actions.subprocess.Popen") as start:
+        with patch("capri.automation.command_dispatcher.os.startfile", side_effect=OSError), patch("capri.automation.command_dispatcher.subprocess.Popen") as start:
             self.app._run('program.exe & other.exe')
         self.assertFalse(start.call_args.kwargs["shell"])
 
@@ -59,7 +59,7 @@ class SecurityTests(unittest.TestCase):
         path.write_bytes(b"untrusted pickle")
         with self.assertRaises(ValueError):
             voice.verify_silero(path)
-        with patch("voice.SILERO_SHA256", hashlib.sha256(path.read_bytes()).hexdigest()):
+        with patch("capri.audio.voice_service.SILERO_SHA256", hashlib.sha256(path.read_bytes()).hexdigest()):
             voice.verify_silero(path)
 
     def test_vosk_bad_checksum_preserves_existing_model(self):
@@ -90,7 +90,7 @@ class SecurityTests(unittest.TestCase):
 class VoiceReliabilityTests(unittest.TestCase):
     def test_play_failure_does_not_disable_online_synthesis(self):
         speaker = voice.Speaker({})
-        with patch("voice.os.path.isfile", return_value=False), \
+        with patch("capri.audio.voice_service.os.path.isfile", return_value=False), \
                 patch.object(speaker, "_edge", side_effect=voice.VoicePlaybackError("device")), \
                 patch.object(speaker, "_sapi", return_value=False) as fallback:
             speaker.say("Проверка")
@@ -98,7 +98,7 @@ class VoiceReliabilityTests(unittest.TestCase):
         self.assertEqual(speaker._edge_retry_at, 0)
 
     def test_play_command_error_is_not_reported_as_success(self):
-        with patch("voice._mci", side_effect=[(0, ""), (0, ""), (1, ""), (0, "")]) as mci:
+        with patch("capri.audio.voice_service._mci", side_effect=[(0, ""), (0, ""), (1, ""), (0, "")]) as mci:
             with self.assertRaises(voice.VoicePlaybackError):
                 voice.play_mp3("voice.wav", Mock())
         self.assertEqual(mci.call_args.args[0], "close capri_tts")
@@ -112,7 +112,7 @@ class VoiceReliabilityTests(unittest.TestCase):
 
     def test_voice_service_backoff_is_capped_at_a_minute(self):
         speaker = voice.Speaker({})
-        with patch("voice.time.monotonic", return_value=100):
+        with patch("capri.audio.voice_service.time.monotonic", return_value=100):
             for _ in range(6):
                 speaker._edge_failed(TimeoutError())
                 self.assertLessEqual(speaker._edge_retry_at, 160)

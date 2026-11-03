@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import gamma
-from actions import Actions, parse_gamma_value
+from capri.automation.command_dispatcher import Actions, parse_gamma_value
+from capri.platform.windows import display_gamma as gamma
 
 
 class FakeDevice:
@@ -125,7 +125,7 @@ class GammaTests(unittest.TestCase):
 
 class GammaCommandTests(unittest.TestCase):
     def test_numeric_and_spoken_gamma_commands(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         commands = (("поставь гамму 2,5", 2.5), ("гамма 1.25", 1.25),
                     ("гамма на три", 3.0), ("установи гамму два с половиной", 2.5),
@@ -134,13 +134,13 @@ class GammaCommandTests(unittest.TestCase):
                     ("гамма ноль точка семь", 0.7), ("гамма два пять", 2.5),
                     ("гамма две целых пять сотых", 2.05), ("гамма полтора", 1.5))
         for command, expected in commands:
-            with self.subTest(command=command), patch("actions.gamma.set_gamma") as set_gamma:
+            with self.subTest(command=command), patch("capri.automation.command_dispatcher.gamma.set_gamma") as set_gamma:
                 reply = app.handle(command)
                 set_gamma.assert_called_once_with(expected)
                 self.assertTrue(app.is_fast_command(command))
                 self.assertIn("Гамма ", reply.text)
         for command in ("гамма ноль", "гамма минус один", "гамма 100", "гамма сколько-нибудь"):
-            with self.subTest(command=command), patch("actions.gamma.set_gamma") as set_gamma:
+            with self.subTest(command=command), patch("capri.automation.command_dispatcher.gamma.set_gamma") as set_gamma:
                 app.handle(command)
                 set_gamma.assert_not_called()
 
@@ -151,18 +151,18 @@ class GammaCommandTests(unittest.TestCase):
             parse_gamma_value("две целых сто десятых")
 
     def test_command_routes_and_fast_recognition(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         for command in ("ночь", "включи ночной режим", "гамма на максимум"):
-            with self.subTest(command=command), patch("actions.gamma.night") as night:
+            with self.subTest(command=command), patch("capri.automation.command_dispatcher.gamma.night") as night:
                 app.handle(command)
                 night.assert_called_once()
                 self.assertTrue(app.is_fast_command(command))
         for command in ("день", "верни гамму", "выключи ночной режим"):
-            with self.subTest(command=command), patch("actions.gamma.restore", return_value=True) as restore:
+            with self.subTest(command=command), patch("capri.automation.command_dispatcher.gamma.restore", return_value=True) as restore:
                 app.handle(command)
                 restore.assert_called_once()
-        with patch("actions.gamma.night", side_effect=OSError("Driver refused")):
+        with patch("capri.automation.command_dispatcher.gamma.night", side_effect=OSError("Driver refused")):
             self.assertIn("Не смогла", app.handle("ночь").text)
 
 

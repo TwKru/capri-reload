@@ -4,7 +4,7 @@ import queue
 import unittest
 from unittest.mock import patch
 
-from voice import Listener
+from capri.audio.voice_service import Listener
 
 
 class PhraseEndpointTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class PhraseEndpointTests(unittest.TestCase):
                 pass
 
         with patch.object(listener, "process", side_effect=lambda data: data), \
-                patch("voice.time.monotonic", side_effect=lambda: clock[0]):
+                patch("capri.audio.voice_service.time.monotonic", side_effect=lambda: clock[0]):
             listener._listen(Stream(), AudioQueue(), Recognizer())
         return results, partials
 

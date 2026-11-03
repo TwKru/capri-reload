@@ -4,10 +4,10 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import local_ai
-import persona
-import voice
-from personality import Personality
+from capri.ai.persona import system_prompts as persona
+from capri.ai.persona.mood import Personality
+from capri.ai.providers import ollama_chat as local_ai
+from capri.audio import voice_service as voice
 
 
 def stream(*chunks):
@@ -18,7 +18,7 @@ class SpeechQualityTests(unittest.TestCase):
     def test_abrupt_stream_end_does_not_speak_unfinished_text(self):
         ai = local_ai.LocalAI({})
         spoken = []
-        with patch("local_ai.urllib.request.urlopen", return_value=stream(
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=stream(
                 {"message": {"content": "Этот ответ оборвался посреди длинного предложения и больше ничего не пришло"}})):
             self.assertIsNone(ai.ask("Объясни", on_sentence=spoken.append))
         self.assertEqual(spoken, [])
@@ -26,7 +26,7 @@ class SpeechQualityTests(unittest.TestCase):
 
     def test_abrupt_stream_keeps_only_already_completed_sentences(self):
         spoken = []
-        with patch("local_ai.urllib.request.urlopen", return_value=stream(
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=stream(
                 {"message": {"content": "Первое предложение завершено. Следующее оборвалось"}})):
             answer = local_ai.LocalAI({}).ask("Объясни", on_sentence=spoken.append)
         self.assertEqual(spoken, ["Первое предложение завершено."])
@@ -50,11 +50,11 @@ class SpeechQualityTests(unittest.TestCase):
                   {"message": {"content": "14 (т. е. число). Следующее "}},
                   {"message": {"content": "предложение."}, "done": True})
         spoken = []
-        with patch("local_ai.urllib.request.urlopen", return_value=stream(*chunks)):
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=stream(*chunks)):
             answer = local_ai.LocalAI({}).ask("Объясни", on_sentence=spoken.append)
         self.assertEqual(spoken, ["Это 3.14 (т. е. число).", "Следующее предложение."])
         self.assertEqual(answer, " ".join(spoken))
-        with patch("local_ai.urllib.request.urlopen", return_value=stream(
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=stream(
                 {"message": {"content": "Она сказала: «Привет!»"}, "done": True})):
             self.assertEqual(local_ai.LocalAI({}).ask("Пример", on_sentence=lambda _: None), "Она сказала: «Привет!»")
 
@@ -62,7 +62,7 @@ class SpeechQualityTests(unittest.TestCase):
         chunk = {"message": {"content": "Первое предложение закончено. Второе предложение оборвалось на"},
                  "done": True, "done_reason": "length"}
         spoken = []
-        with patch("local_ai.urllib.request.urlopen", return_value=stream(chunk)):
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=stream(chunk)):
             answer = local_ai.LocalAI({}).ask("Объясни", on_sentence=spoken.append)
         self.assertEqual(spoken, ["Первое предложение закончено."])
         self.assertEqual(answer, spoken[0])
@@ -78,7 +78,7 @@ class SpeechQualityTests(unittest.TestCase):
         ai.history = [{"role": "assistant", "content": "Старый ответ."},
                       {"role": "user", "content": "Первый вопрос"},
                       {"role": "assistant", "content": "Первый ответ."}]
-        with patch("local_ai._post", return_value={"message": {"content": "Новый ответ."}}) as request:
+        with patch("capri.ai.providers.ollama_chat._post", return_value={"message": {"content": "Новый ответ."}}) as request:
             ai.ask("Следующий вопрос")
         messages = request.call_args.args[1]["messages"]
         self.assertEqual(messages[1]["role"], "user")
@@ -87,14 +87,14 @@ class SpeechQualityTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "Следующий вопрос")
 
     def test_model_stop_without_punctuation_is_still_a_valid_answer(self):
-        with patch("local_ai._post", return_value={"message": {"content": "Конечно"}, "done_reason": "stop"}):
+        with patch("capri.ai.providers.ollama_chat._post", return_value={"message": {"content": "Конечно"}, "done_reason": "stop"}):
             self.assertEqual(local_ai.LocalAI({}).ask("Поможешь?"), "Конечно.")
 
 
 class CasualStyleTests(unittest.TestCase):
     def test_casual_script_is_rare_and_preserves_target(self):
         target = "CS2 {name} 30"
-        with patch.object(persona, "_CASUAL_TURN", 0), patch("persona.random.choice", side_effect=lambda values: values[0]):
+        with patch.object(persona, "_CASUAL_TURN", 0), patch("capri.ai.persona.system_prompts.random.choice", side_effect=lambda values: values[0]):
             replies = [persona.line("open", t=target) for _ in range(24)]
         self.assertTrue(all(target in reply for reply in replies))
         self.assertEqual(sum("блядь" in reply for reply in replies), 0)
@@ -117,8 +117,8 @@ class UncensoredVoiceTests(unittest.TestCase):
         speaker = voice.Speaker({"voice": "ru-RU-SvetlanaNeural"})
         text = "Готово. Заебись."
         with patch("edge_tts.Communicate") as network, \
-                patch("voice.decode", return_value=np.zeros(200, np.float32)), \
-                patch("voice.write_wav") as output:
+                patch("capri.audio.voice_service.decode", return_value=np.zeros(200, np.float32)), \
+                patch("capri.audio.voice_service.write_wav") as output:
             network.return_value.save = AsyncMock()
             self.assertEqual(speaker.render(text, "voice.wav"), "voice.wav")
         self.assertEqual(network.call_count, 2)
@@ -137,7 +137,7 @@ class UncensoredVoiceTests(unittest.TestCase):
     def test_network_failure_keeps_fallback_for_all_text(self):
         for text in ("Готово.", "Заебись."):
             speaker = voice.Speaker({})
-            with patch("voice.os.path.isfile", return_value=False), \
+            with patch("capri.audio.voice_service.os.path.isfile", return_value=False), \
                     patch.object(speaker, "_edge", side_effect=RuntimeError("offline")), \
                     patch.object(speaker, "_sapi", return_value=False) as fallback:
                 speaker.say(text)

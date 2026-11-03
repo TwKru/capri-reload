@@ -1,16 +1,16 @@
 import asyncio
 import http.server
 import json
-from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
 import urllib.request
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-import cancellation
-import actions
-import voice
+from capri.audio import voice_service as voice
+from capri.automation import command_dispatcher as actions
+from capri.core import cancellation
 
 
 class CancellationTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class CancellationTests(unittest.TestCase):
                 started.set()
                 await asyncio.sleep(10)
         with tempfile.TemporaryDirectory() as folder, patch("edge_tts.Communicate") as edge, \
-                patch("voice.decode", side_effect=ValueError("bad audio")):
+                patch("capri.audio.voice_service.decode", side_effect=ValueError("bad audio")):
             edge.return_value.save = save
             def render():
                 try:
@@ -84,7 +84,7 @@ class CancellationTests(unittest.TestCase):
             events.append((code, flags))
             if not flags & 2:
                 scope.cancel()
-        with patch("actions.ctypes.windll.user32", Mock(keybd_event=key)), scope.bind():
+        with patch("capri.automation.command_dispatcher.ctypes.windll.user32", Mock(keybd_event=key)), scope.bind():
             with self.assertRaises(cancellation.RequestCancelled):
                 actions.send_keys(["ctrl", "a"])
         self.assertEqual(len(events), 2)
@@ -93,26 +93,26 @@ class CancellationTests(unittest.TestCase):
         self.assertTrue(events[1][1] & 2)
 
     def test_cancelled_chain_never_runs_next_step(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = actions.Actions({}, ".", None)
         scope = cancellation.Scope()
         def first(step):
             scope.cancel()
             return actions.Reply("Готово.")
         app.handle_one = Mock(side_effect=first)
-        with patch("automation.foreground_title", return_value=""), scope.bind():
+        with patch("capri.automation.window_input.foreground_title", return_value=""), scope.bind():
             with self.assertRaises(cancellation.RequestCancelled):
                 app.run_chain(["первая", "вторая"])
         app.handle_one.assert_called_once_with("первая")
 
     def test_stop_during_paste_restores_previous_clipboard(self):
-        import automation
+        from capri.automation import window_input as automation
         scope = cancellation.Scope()
         def stop_on_paste(keys):
             scope.cancel()
-        with patch("media._clipboard_text", return_value="old"), \
-                patch("automation.set_clipboard", return_value=True) as clipboard, \
-                patch("actions.send_keys", side_effect=stop_on_paste), scope.bind():
+        with patch("capri.platform.windows.media_controls._clipboard_text", return_value="old"), \
+                patch("capri.automation.window_input.set_clipboard", return_value=True) as clipboard, \
+                patch("capri.automation.command_dispatcher.send_keys", side_effect=stop_on_paste), scope.bind():
             with self.assertRaises(cancellation.RequestCancelled):
                 automation.paste_text("new")
         self.assertEqual([call.args[0] for call in clipboard.call_args_list], ["new", "old"])

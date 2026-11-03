@@ -1,14 +1,15 @@
 """Native Russian Masha, bounded inference, pitch compensation and non-destructive glitches."""
 import hashlib
 import io
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
-import kokoro_voice as kv
-import voice
+
+from capri.audio import kokoro_backend as kv
+from capri.audio import voice_service as voice
 
 
 class MashaVoiceTests(unittest.TestCase):
@@ -49,8 +50,8 @@ class MashaVoiceTests(unittest.TestCase):
         speaker = voice.Speaker({"tts_engine": "kokoro", "kokoro_voice": "masha", "voice_shift": 3,
                                  "voice_fx": .3, "voice_glitch": .25, "kokoro_speed": 1})
         with patch.object(speaker.kokoro, "render") as synth, \
-                patch("voice.decode", return_value=np.ones(24000, np.float32) * .2), \
-                patch("voice.write_wav"):
+                patch("capri.audio.voice_service.decode", return_value=np.ones(24000, np.float32) * .2), \
+                patch("capri.audio.voice_service.write_wav"):
             speaker.render("Мой голос стал выше.", "out.wav")
         self.assertEqual(speaker.kokoro.variant, "masha")
         self.assertAlmostEqual(synth.call_args.kwargs["speed"], 2 ** (-3 / 12))
@@ -72,7 +73,7 @@ class MashaVoiceTests(unittest.TestCase):
         payload = b"pinned model"
         spec = {"model.onnx": ("model.onnx", len(payload), hashlib.sha256(payload).hexdigest())}
         with tempfile.TemporaryDirectory() as temp, patch.object(kv, "MASHA_FILES", spec), \
-                patch("kokoro_voice.urllib.request.urlopen", return_value=io.BytesIO(payload)):
+                patch("capri.audio.kokoro_backend.urllib.request.urlopen", return_value=io.BytesIO(payload)):
             kv.install_masha(Path(temp) / "voice")
             kv.verify_masha(Path(temp) / "voice")
             self.assertEqual((Path(temp) / "voice/model.onnx").read_bytes(), payload)
@@ -81,7 +82,7 @@ class MashaVoiceTests(unittest.TestCase):
         good, bad = b"model data", b"wrong data"
         spec = {"model.onnx": ("model.onnx", len(good), hashlib.sha256(good).hexdigest())}
         with tempfile.TemporaryDirectory() as temp, patch.object(kv, "MASHA_FILES", spec), \
-                patch("kokoro_voice.urllib.request.urlopen", return_value=io.BytesIO(bad)):
+                patch("capri.audio.kokoro_backend.urllib.request.urlopen", return_value=io.BytesIO(bad)):
             folder = Path(temp) / "voice"
             folder.mkdir()
             (folder / "model.onnx").write_bytes(good)

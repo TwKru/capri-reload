@@ -1,0 +1,1 @@
+"""capri/core — модули Capri."""

@@ -1,0 +1,72 @@
+# Переименованные файлы
+
+Все модули приложения перенесены из корня в пакет `capri`. Корневой `main.py` сохранён как короткая точка входа; прежняя логика разделена между контроллером, настройками и Windows-приложением.
+
+| Раньше | Теперь |
+|---|---|
+| `main.py` | [`capri/app/controller.py`](../capri/app/controller.py) |
+| `portable_main.py` | [`capri/app/portable_application.py`](../capri/app/portable_application.py) |
+| `extensions.py` | [`capri/app/runtime_services.py`](../capri/app/runtime_services.py) |
+| `diagnostics.py` | [`capri/app/diagnostics.py`](../capri/app/diagnostics.py) |
+| `cancellation.py` | [`capri/core/cancellation.py`](../capri/core/cancellation.py) |
+| `ai.py` | [`capri/ai/providers/legacy_anthropic.py`](../capri/ai/providers/legacy_anthropic.py) |
+| `openai_ai.py` | [`capri/ai/providers/openai_provider.py`](../capri/ai/providers/openai_provider.py) |
+| `gemini_ai.py` | [`capri/ai/providers/gemini_provider.py`](../capri/ai/providers/gemini_provider.py) |
+| `cloud_ai.py` | [`capri/ai/providers/cloud_providers.py`](../capri/ai/providers/cloud_providers.py) |
+| `local_ai.py` | [`capri/ai/providers/ollama_chat.py`](../capri/ai/providers/ollama_chat.py) |
+| `local_tools.py` | [`capri/ai/providers/ollama_tools.py`](../capri/ai/providers/ollama_tools.py) |
+| `llama_runtime.py` | [`capri/ai/providers/llama_cpp.py`](../capri/ai/providers/llama_cpp.py) |
+| `intent_router.py` | [`capri/ai/intent_router.py`](../capri/ai/intent_router.py) |
+| `request_planner.py` | [`capri/ai/request_planner.py`](../capri/ai/request_planner.py) |
+| `model_policy.py` | [`capri/ai/model_selection.py`](../capri/ai/model_selection.py) |
+| `persona.py` | [`capri/ai/persona/system_prompts.py`](../capri/ai/persona/system_prompts.py) |
+| `personality.py` | [`capri/ai/persona/mood.py`](../capri/ai/persona/mood.py) |
+| `user_persona.py` | [`capri/ai/persona/personality_file.py`](../capri/ai/persona/personality_file.py) |
+| `action_replies.py` | [`capri/ai/persona/action_responses.py`](../capri/ai/persona/action_responses.py) |
+| `dismissal.py` | [`capri/ai/persona/dismissal_intent.py`](../capri/ai/persona/dismissal_intent.py) |
+| `voice.py` | [`capri/audio/voice_service.py`](../capri/audio/voice_service.py) |
+| `asr_backends.py` | [`capri/audio/speech_recognition.py`](../capri/audio/speech_recognition.py) |
+| `kokoro_voice.py` | [`capri/audio/kokoro_backend.py`](../capri/audio/kokoro_backend.py) |
+| `memory.py` | [`capri/storage/conversation_memory.py`](../capri/storage/conversation_memory.py) |
+| `jobs.py` | [`capri/storage/task_store.py`](../capri/storage/task_store.py) |
+| `file_workspace.py` | [`capri/storage/file_workspace.py`](../capri/storage/file_workspace.py) |
+| `actions.py` | [`capri/automation/command_dispatcher.py`](../capri/automation/command_dispatcher.py) |
+| `automation.py` | [`capri/automation/window_input.py`](../capri/automation/window_input.py) |
+| `tool_agent.py` | [`capri/automation/desktop_agent.py`](../capri/automation/desktop_agent.py) |
+| `pointer_tools.py` | [`capri/automation/agent_input.py`](../capri/automation/agent_input.py) |
+| `program_lookup.py` | [`capri/automation/application_search.py`](../capri/automation/application_search.py) |
+| `avatar.py` | [`capri/desktop/avatar.py`](../capri/desktop/avatar.py) |
+| `desktop_life.py` | [`capri/desktop/window_companion.py`](../capri/desktop/window_companion.py) |
+| `screen_vision.py` | [`capri/desktop/screen_capture.py`](../capri/desktop/screen_capture.py) |
+| `music_life.py` | [`capri/desktop/music_reactions.py`](../capri/desktop/music_reactions.py) |
+| `web_search.py` | [`capri/services/web_search.py`](../capri/services/web_search.py) |
+| `weather.py` | [`capri/services/weather_service.py`](../capri/services/weather_service.py) |
+| `media.py` | [`capri/platform/windows/media_controls.py`](../capri/platform/windows/media_controls.py) |
+| `gamma.py` | [`capri/platform/windows/display_gamma.py`](../capri/platform/windows/display_gamma.py) |
+| `zapret.py` | [`capri/platform/windows/network_workaround.py`](../capri/platform/windows/network_workaround.py) |
+| `startup.py` | [`capri/platform/startup.py`](../capri/platform/startup.py) |
+| `updater.py` | [`capri/updates/source_updater.py`](../capri/updates/source_updater.py) |
+| `native_update.py` | [`capri/updates/executable_updater.py`](../capri/updates/executable_updater.py) |
+| `theme.py` | [`capri/ui/theme.py`](../capri/ui/theme.py) |
+| `control_menu.py` | [`capri/ui/tray_menu.py`](../capri/ui/tray_menu.py) |
+| `transitions.py` | [`capri/ui/startup_animation.py`](../capri/ui/startup_animation.py) |
+| `mainframe.py` | [`capri/ui/mainframe.py`](../capri/ui/mainframe.py) |
+| `ai_dialog.py` | [`capri/ui/dialogs/ai_settings.py`](../capri/ui/dialogs/ai_settings.py) |
+| `sound_dialog.py` | [`capri/ui/dialogs/audio_settings.py`](../capri/ui/dialogs/audio_settings.py) |
+| `profile_dialog.py` | [`capri/ui/dialogs/user_profile.py`](../capri/ui/dialogs/user_profile.py) |
+| `entries_dialog.py` | [`capri/ui/dialogs/app_shortcuts.py`](../capri/ui/dialogs/app_shortcuts.py) |
+| `tools/install.py` | [`tools/install_dependencies.py`](../tools/install_dependencies.py) |
+| `tools/install_ai.py` | [`tools/install_ollama.py`](../tools/install_ollama.py) |
+| `tools/download_model.py` | [`tools/install_vosk_model.py`](../tools/install_vosk_model.py) |
+| `tools/make_release.py` | [`tools/package_source_release.py`](../tools/package_source_release.py) |
+| `tools/make_media.py` | [`tools/generate_media_assets.py`](../tools/generate_media_assets.py) |
+| `tools/convert_anim.py` | [`tools/convert_animation_frames.py`](../tools/convert_animation_frames.py) |
+| `tools/import_motion_sheets.py` | [`tools/import_sprite_sheets.py`](../tools/import_sprite_sheets.py) |
+| `tools/voice_stats.py` | [`tools/analyze_voice_samples.py`](../tools/analyze_voice_samples.py) |
+| `launch.py` | `capri/app/bootstrap.py`; запуск через `main.py` |
+| `tools/Capri.iss` | `tools/capri_installer.iss` |
+| `DEVELOPMENT.md` | `docs/development.md` |
+| `DESKTOP_GUIDE.md` | `docs/user_guide.md` |
+| `КОМАНДЫ.md` | `docs/voice_commands.md` |
+| `PERFORMANCE.md` | `docs/performance.md` |
+| `SECURITY.md` | `docs/security.md` |

@@ -9,5 +9,5 @@ if not defined PY (
   pause
   exit /b 1
 )
-%PY% tools\install_ai.py
+%PY% -m tools.install_ollama
 pause

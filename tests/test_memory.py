@@ -1,19 +1,18 @@
 """Память переживает перезапуск, не тратит API-вызовы и сохраняет отмену запросов."""
 import copy
 import io
-import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-import main
-from memory import MemoryStore, MAX_FACTS, MAX_TURNS
-from openai_ai import APIError
-from tools import make_release
+from capri.ai.providers.openai_provider import APIError
+from capri.app import controller as main
+from capri.storage.conversation_memory import MAX_FACTS, MAX_TURNS, MemoryStore
+from tools import package_source_release as make_release
 
 
 class MemoryStoreTests(unittest.TestCase):
@@ -107,7 +106,7 @@ class MemoryStoreTests(unittest.TestCase):
     def test_failed_atomic_save_keeps_old_file_and_memory(self):
         self.memory.remember("Первый факт")
         previous = self.path.read_bytes()
-        with patch("memory.os.replace", side_effect=OSError("disk")), self.assertRaises(OSError):
+        with patch("capri.storage.conversation_memory.os.replace", side_effect=OSError("disk")), self.assertRaises(OSError):
             self.memory.remember("Второй факт")
         self.assertEqual(self.path.read_bytes(), previous)
         self.assertEqual(len(self.memory.data["facts"]), 1)
@@ -144,7 +143,7 @@ class MemoryIntegrationTests(unittest.TestCase):
     def make_capri(self):
         cfg = copy.deepcopy(main.DEFAULTS)
         cfg.update(ai_mode="openai", openai_api_key="fake-test-key")
-        with patch("main.Actions"), patch("main.Speaker"), patch("main.make_glitch_sound"):
+        with patch("capri.app.controller.Actions"), patch("capri.app.controller.Speaker"), patch("capri.app.controller.make_glitch_sound"):
             capri = main.Capri(cfg)
         capri.say = Mock(return_value=False)
         capri.ai.client.complete = Mock(return_value="Ответ.")
@@ -188,7 +187,7 @@ class MemoryIntegrationTests(unittest.TestCase):
     def test_cancelled_answer_is_not_saved(self):
         epoch = self.capri.cancel_epoch
         def stop(*args, **kwargs):
-            with patch("main.stop_sound"):
+            with patch("capri.app.controller.stop_sound"):
                 self.capri.stop_listening()
             return "Поздний ответ."
         self.capri.ai.client.complete.side_effect = stop

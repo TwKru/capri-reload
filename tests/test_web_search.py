@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from actions import Actions
-from local_ai import LocalAI
-from web_search import WebSearch, valid_url
-
+from capri.ai.providers.ollama_chat import LocalAI
+from capri.automation.command_dispatcher import Actions
+from capri.services.web_search import WebSearch, valid_url
 
 SOURCE = {"title": "Физика", "url": "https://example.org/sky", "text": "Синий свет рассеивается сильнее красного."}
 
@@ -32,16 +31,16 @@ class WebSearchTests(unittest.TestCase):
     def test_cache_expires_for_fresh_facts(self):
         search = WebSearch()
         row = {"title": SOURCE["title"], "href": SOURCE["url"], "body": SOURCE["text"]}
-        with patch.object(search, "_fetch", return_value=[row]) as fetch, patch("web_search.time.monotonic", return_value=0):
+        with patch.object(search, "_fetch", return_value=[row]) as fetch, patch("capri.services.web_search.time.monotonic", return_value=0):
             search.ask("курс валют")
-        with patch.object(search, "_fetch", return_value=[row]) as fetch, patch("web_search.time.monotonic", return_value=121):
+        with patch.object(search, "_fetch", return_value=[row]) as fetch, patch("capri.services.web_search.time.monotonic", return_value=121):
             search.ask("курс валют")
             fetch.assert_called_once()
 
 
 class ResearchRoutingTests(unittest.TestCase):
     def setUp(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.actions = Actions({}, ".", None)
         self.actions.web = Mock()
 
@@ -53,9 +52,9 @@ class ResearchRoutingTests(unittest.TestCase):
         self.actions.web.assert_not_called()
 
     def test_failed_response_does_not_claim_or_offer_browser_search(self):
-        import persona
+        from capri.ai.persona import system_prompts as persona
         for variant in persona.LINES["dont_know"]:
-            with patch("persona.random.choice", return_value=variant):
+            with patch("capri.ai.persona.system_prompts.random.choice", return_value=variant):
                 reply = self.actions.fallback("ты чмо иди на хер", force_search=True)
             self.assertNotRegex(reply.text.lower(), r"поиск|поищу|сети|загугли|найди")
         self.actions.web.assert_not_called()

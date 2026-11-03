@@ -3,23 +3,23 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import media
-from actions import Actions
-from action_replies import ACTION_REPLIES
+from capri.ai.persona.action_responses import ACTION_REPLIES
+from capri.automation.command_dispatcher import Actions
+from capri.platform.windows import media_controls as media
 
 
 class PlaybackCommandTests(unittest.TestCase):
     def setUp(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.app = Actions({}, ".", None)
         self.app.web = Mock()
 
     def test_like_commands_use_music_page_and_report_only_verified_success(self):
         for command in ("поставь лайк песне", "лайкни трек", "лайк", "добавь песню в понравившиеся"):
-            with self.subTest(command=command), patch("actions.media.music_page_control", return_value=True) as like:
+            with self.subTest(command=command), patch("capri.automation.command_dispatcher.media.music_page_control", return_value=True) as like:
                 self.assertIn(self.app.handle(command).text, ACTION_REPLIES["like"])
                 like.assert_called_once_with("like", True)
-        with patch("actions.media.music_page_control", return_value=False):
+        with patch("capri.automation.command_dispatcher.media.music_page_control", return_value=False):
             self.assertIn("Не удалось", self.app.handle("лайкни песню").text)
 
     def test_next_previous_phrases(self):
@@ -29,33 +29,33 @@ class PlaybackCommandTests(unittest.TestCase):
                                 ("next track", "next"), ("скип", "next"), ("skip song", "next"),
                                 ("прев", "prev"), ("previous track", "prev")):
             with self.subTest(command=command), \
-                    patch("actions.media.control", return_value=(True, "Song", "player")) as control, \
-                    patch("actions.media.now_playing", return_value=None), patch("actions.time.sleep"), \
-                    patch("actions.media.music_page_control") as fallback:
+                    patch("capri.automation.command_dispatcher.media.control", return_value=(True, "Song", "player")) as control, \
+                    patch("capri.automation.command_dispatcher.media.now_playing", return_value=None), patch("capri.automation.command_dispatcher.time.sleep"), \
+                    patch("capri.automation.command_dispatcher.media.music_page_control") as fallback:
                 self.app.handle(command)
                 control.assert_called_once_with(action)
                 fallback.assert_not_called()
 
     def test_next_uses_page_when_system_control_fails(self):
-        with patch("actions.media.control", return_value=(False, None, None)), \
-                patch("actions.media.music_page_control", return_value=True) as fallback, \
-                patch("actions.media.now_playing", side_effect=RuntimeError), patch("actions.time.sleep"):
+        with patch("capri.automation.command_dispatcher.media.control", return_value=(False, None, None)), \
+                patch("capri.automation.command_dispatcher.media.music_page_control", return_value=True) as fallback, \
+                patch("capri.automation.command_dispatcher.media.now_playing", side_effect=RuntimeError), patch("capri.automation.command_dispatcher.time.sleep"):
             self.app.handle("включи следующую песню")
             fallback.assert_called_once_with("next")
 
     def test_misheard_next_is_corrected_only_in_media_context(self):
-        with patch("actions.media.now_playing", return_value=("Song", "player", True)):
+        with patch("capri.automation.command_dispatcher.media.now_playing", return_value=("Song", "player", True)):
             self.assertEqual(self.app.normalize_voice_command("текст"), "следующий трек")
             self.assertEqual(self.app.normalize_voice_command("текст трек"), "следующий трек")
             self.assertEqual(self.app.normalize_voice_command("напиши текст"), "напиши текст")
             self.assertEqual(self.app.normalize_voice_command("объясни этот текст"), "объясни этот текст")
-        with patch("actions.media.now_playing", return_value=None), \
-                patch("automation.find_window", return_value=None):
+        with patch("capri.automation.command_dispatcher.media.now_playing", return_value=None), \
+                patch("capri.automation.window_input.find_window", return_value=None):
             self.assertEqual(self.app.normalize_voice_command("текст"), "текст")
 
     def test_misheard_next_works_with_music_page_without_system_session(self):
-        with patch("actions.media.now_playing", side_effect=RuntimeError), \
-                patch("automation.find_window", return_value=123):
+        with patch("capri.automation.command_dispatcher.media.now_playing", side_effect=RuntimeError), \
+                patch("capri.automation.window_input.find_window", return_value=123):
             self.assertEqual(self.app.normalize_voice_command("текст"), "следующий трек")
 
     def test_repeat_and_shuffle_values(self):
@@ -69,8 +69,8 @@ class PlaybackCommandTests(unittest.TestCase):
                     ("выключи перемешивание", "shuffle", False))
         for command, action, value in commands:
             with self.subTest(command=command), \
-                    patch("actions.media.playback_mode", return_value=True) as mode, \
-                    patch("actions.media.music_page_control") as fallback:
+                    patch("capri.automation.command_dispatcher.media.playback_mode", return_value=True) as mode, \
+                    patch("capri.automation.command_dispatcher.media.music_page_control") as fallback:
                 reply = self.app.handle(command)
                 self.assertIsNotNone(reply)
                 self.assertNotIn("Не удалось", reply.text)
@@ -78,8 +78,8 @@ class PlaybackCommandTests(unittest.TestCase):
                 fallback.assert_not_called()
 
     def test_unsupported_mode_is_not_reported_as_success(self):
-        with patch("actions.media.playback_mode", return_value=False), \
-                patch("actions.media.music_page_control", return_value=False):
+        with patch("capri.automation.command_dispatcher.media.playback_mode", return_value=False), \
+                patch("capri.automation.command_dispatcher.media.music_page_control", return_value=False):
             self.assertIn("Не удалось", self.app.handle("зацикли песню").text)
 
 
@@ -117,7 +117,7 @@ class SystemModeTests(unittest.TestCase):
 
 class MusicPageTests(unittest.TestCase):
     def execute(self, action, value, button, invoke):
-        with patch("automation.find_window", return_value=123), \
+        with patch("capri.automation.window_input.find_window", return_value=123), \
                 patch.object(media, "browser_url", return_value="https://music.youtube.com/watch?v=example"), \
                 patch.object(media, "_music_buttons", return_value=[button]), \
                 patch.object(media, "_invoke_music_button", side_effect=invoke) as click, \
@@ -179,7 +179,7 @@ class MusicPageTests(unittest.TestCase):
             self.assertEqual(self.execute("like", True, button, lambda b: None), (False, 0))
 
     def test_like_rejects_other_domains_without_clicking(self):
-        with patch("automation.find_window", return_value=123), patch.object(media, "_music_buttons") as buttons:
+        with patch("capri.automation.window_input.find_window", return_value=123), patch.object(media, "_music_buttons") as buttons:
             for url in (None, "https://youtube.com/watch?v=1", "https://music.youtube.com.example.org/"):
                 with patch.object(media, "browser_url", return_value=url):
                     self.assertFalse(media.music_page_control("like", True))
@@ -222,7 +222,7 @@ class MusicPageTests(unittest.TestCase):
         self.assertEqual(self.execute("play", None, button, invoke), (True, 0))
 
     def test_other_websites_are_not_controlled(self):
-        with patch("automation.find_window", return_value=123), \
+        with patch("capri.automation.window_input.find_window", return_value=123), \
                 patch.object(media, "browser_url", return_value="https://example.com/"), \
                 patch.object(media, "_music_buttons") as buttons:
             self.assertFalse(media.music_page_control("next"))

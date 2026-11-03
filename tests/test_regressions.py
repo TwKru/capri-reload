@@ -10,10 +10,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-import actions
-import automation
-import voice
-from local_ai import LocalAI
+from capri.ai.providers.ollama_chat import LocalAI
+from capri.audio import voice_service as voice
+from capri.automation import command_dispatcher as actions
+from capri.automation import window_input as automation
 
 
 class CommandTests(unittest.TestCase):
@@ -23,10 +23,11 @@ class CommandTests(unittest.TestCase):
 
     def test_fast_command_detection_does_not_execute_actions(self):
         self.app.sites = {"ютуб": "https://www.youtube.com"}
-        for command in ("открой ютуб", "выключи звук браузера", "громкость браузера ноль", "поставь на паузу"):
+        for command in ("открой ютуб", "выключи звук браузера", "громкость браузера ноль", "поставь на паузу",
+                        "найди музыку", "открой неизвестный сайт"):
             with self.subTest(command=command):
                 self.assertTrue(self.app.is_fast_command(command))
-        for command in ("найди музыку", "открой неизвестный сайт", "выключи компьютер",
+        for command in ("выключи компьютер",
                         "напиши привет", "почему звук браузера тихий", "как увеличить громкость"):
             with self.subTest(command=command):
                 self.assertFalse(self.app.is_fast_command(command))
@@ -112,7 +113,7 @@ class CommandTests(unittest.TestCase):
 class LocalPerformanceTests(unittest.TestCase):
     def test_dispatcher_model_is_not_selected_as_chat_fallback(self):
         ai = LocalAI({})
-        with patch.object(ai, "installed", return_value=["qwen3:0.6b"]), patch("local_ai._post") as post:
+        with patch.object(ai, "installed", return_value=["qwen3:0.6b"]), patch("capri.ai.providers.ollama_chat._post") as post:
             ai.start_server()
         self.assertEqual(ai.model, "qwen3:8b")
         post.assert_not_called()
@@ -122,7 +123,7 @@ class LocalPerformanceTests(unittest.TestCase):
             with self.subTest(cfg=cfg):
                 ai = LocalAI(cfg)
                 with patch.object(ai, "installed", return_value=[ai.model]), \
-                        patch("local_ai._post", return_value={"message": {"content": "Готово."}}) as post:
+                        patch("capri.ai.providers.ollama_chat._post", return_value={"message": {"content": "Готово."}}) as post:
                     ai.start_server()
                     self.assertEqual(post.call_args.args[1]["keep_alive"], expected)
                     ai._chat([{"role": "user", "content": "Привет"}])
@@ -130,7 +131,7 @@ class LocalPerformanceTests(unittest.TestCase):
 
     def test_local_chat_timeout_is_short_and_configurable(self):
         for cfg, expected in (({}, 15), ({"local_timeout_seconds": 5}, 5)):
-            with patch("local_ai._post", return_value={"message": {"content": "Готово."}}) as post:
+            with patch("capri.ai.providers.ollama_chat._post", return_value={"message": {"content": "Готово."}}) as post:
                 LocalAI(cfg)._chat([{"role": "user", "content": "Привет"}])
                 self.assertEqual(post.call_args.args[2], expected)
 

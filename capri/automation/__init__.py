@@ -1,0 +1,1 @@
+"""capri/automation — модули Capri."""

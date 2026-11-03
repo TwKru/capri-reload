@@ -1,12 +1,12 @@
 """Диспетчер: типы, диапазоны и исполнение без произвольных цепочек команд."""
 import io
 import json
-import unittest
 import types
+import unittest
 from unittest.mock import Mock, patch
 
-from actions import Actions
-from intent_router import Decision, IntentRouter
+from capri.ai.intent_router import Decision, IntentRouter
+from capri.automation.command_dispatcher import Actions
 
 
 def decision(action="chat", target="", value=None, relative=False):
@@ -16,7 +16,7 @@ def decision(action="chat", target="", value=None, relative=False):
 class RouterTests(unittest.TestCase):
     def test_json_schema_and_request_options(self):
         body = {"message": {"content": json.dumps(decision("volume", "discord", -10, True))}}
-        with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())) as request:
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())) as request:
             result = IntentRouter({}).ask("Потише дискорд")
         self.assertEqual(result.command(), "сделай discord тише на 10")
         payload = json.loads(request.call_args.args[0].data)
@@ -34,7 +34,7 @@ class RouterTests(unittest.TestCase):
 
     def test_failure_has_cooldown_and_does_not_block_every_question(self):
         router = IntentRouter({})
-        with patch("intent_router.urllib.request.urlopen", side_effect=TimeoutError) as request:
+        with patch("capri.ai.intent_router.urllib.request.urlopen", side_effect=TimeoutError) as request:
             self.assertIsNone(router.ask("Первый запрос"))
             self.assertIsNone(router.ask("Второй запрос"))
             self.assertEqual(request.call_count, 1)
@@ -42,12 +42,12 @@ class RouterTests(unittest.TestCase):
     def test_warming_router_does_not_delay_commands(self):
         router = IntentRouter({})
         router.warming = True
-        with patch("intent_router.urllib.request.urlopen") as request:
+        with patch("capri.ai.intent_router.urllib.request.urlopen") as request:
             self.assertIsNone(router.ask("Запрос"))
             request.assert_not_called()
 
     def test_dispatch_uses_direct_handlers_and_keeps_target_as_data(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         app.media_next = Mock(return_value="next result")
         app.search = Mock(return_value="search result")
@@ -68,7 +68,7 @@ class RouterTests(unittest.TestCase):
     def test_questions_and_prohibitions_are_classified_but_never_executed(self):
         for phrase in ("Как выключить компьютер?", "не выключай музыку", "не ставь лайк"):
             body = {"message": {"content": json.dumps(decision("music"))}}
-            with patch("intent_router.urllib.request.urlopen",
+            with patch("capri.ai.intent_router.urllib.request.urlopen",
                        return_value=io.BytesIO(json.dumps(body).encode())) as request:
                 self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
                 request.assert_called_once()
@@ -76,18 +76,18 @@ class RouterTests(unittest.TestCase):
     def test_basic_dialogue_overrides_wrong_search_decision_after_model_call(self):
         for phrase in ("привет", "давай поговорим", "как дела", "расскажи шутку", "мне скучно"):
             body = {"message": {"content": json.dumps(decision("search", phrase))}}
-            with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())) as request:
+            with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())) as request:
                 self.assertEqual(IntentRouter({}).ask(phrase).action, "chat")
                 request.assert_called_once()
 
     def test_first_stage_sends_fresh_question_to_second_check(self):
         body = {"message": {"content": json.dumps(decision("search", "Кто сейчас президент Франции"))}}
-        with patch("intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())):
+        with patch("capri.ai.intent_router.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(body).encode())):
             self.assertEqual(IntentRouter({}).ask("Кто сейчас президент Франции?").action, "chat")
 
     def test_dialogue_context_is_sent_as_data(self):
         body = {"message": {"content": json.dumps(decision("hide"))}}
-        with patch("intent_router.urllib.request.urlopen",
+        with patch("capri.ai.intent_router.urllib.request.urlopen",
                    return_value=io.BytesIO(json.dumps(body).encode())) as request:
             result = IntentRouter({}).ask("нет", context={"awaiting_confirmation": True})
         self.assertEqual(result.action, "command")
@@ -96,30 +96,30 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(payload["messages"][-1]["content"], "нет")
 
     def test_explicit_volume_number_overrides_wrong_model_parameter(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         volume = Mock()
         volume.GetMasterVolume.return_value = 0.7
         session = types.SimpleNamespace(Process=types.SimpleNamespace(name=lambda: "chrome.exe"),
                                         SimpleAudioVolume=volume)
         with patch("pycaw.pycaw.AudioUtilities.GetAllSessions", return_value=[session]), \
-                patch("actions._endpoint") as endpoint:
+                patch("capri.automation.command_dispatcher._endpoint") as endpoint:
             app.execute_decision(Decision("volume", "браузер", -10, True),
                                  original="Можешь поставить громкость браузера на тридцать?")
         volume.SetMasterVolume.assert_called_once_with(0.3, None)
         endpoint.assert_not_called()
 
     def test_hallucinated_app_target_is_not_used(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         with patch("pycaw.pycaw.AudioUtilities.GetAllSessions") as sessions:
             app.execute_decision(Decision("volume", "discord", -10, True), original="Сделай телеграм тише")
             sessions.assert_not_called()
 
     def test_gamma_value_is_taken_from_request(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
-        with patch("actions.gamma.set_gamma") as set_gamma:
+        with patch("capri.automation.command_dispatcher.gamma.set_gamma") as set_gamma:
             app.execute_decision(Decision("gamma", value=4.5), original="Можешь поставить гамму на два с половиной?")
             set_gamma.assert_called_once_with(2.5)
 

@@ -25,3 +25,17 @@ capri-update.log
 *.tmp
 
 capri-crash.log
+
+# Личные заметки, характер и очередь
+/me.md
+/personality.md
+/personality.backup.md
+/jobs.sqlite*
+*.capri-backup
+/dist/
+/build/
+/voicenew/
+*.lnk
+
+# Silero is installed with a pinned checksum; the model exceeds GitHub's file limit.
+/bundled/silero/*.pt

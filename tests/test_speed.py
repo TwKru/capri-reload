@@ -1,12 +1,12 @@
 """Потоковые ответы и быстрый запасной голос без сети и воспроизведения звука."""
-import json
 import asyncio
+import json
 import unittest
 from unittest.mock import patch
 
-import local_ai
-import voice
-from actions import Actions
+from capri.ai.providers import ollama_chat as local_ai
+from capri.audio import voice_service as voice
+from capri.automation.command_dispatcher import Actions
 
 
 class Response:
@@ -32,7 +32,7 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(spoken, ["Привет."])
             yield {"message": {"content": " фраза."}, "done": True}
         ai = local_ai.LocalAI({})
-        with patch("local_ai.urllib.request.urlopen", return_value=Response(packets())) as request:
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=Response(packets())) as request:
             answer = ai.ask("Поговорим?", on_sentence=spoken.append)
         self.assertEqual(spoken, ["Привет.", "Вторая фраза."])
         self.assertEqual(answer, "Привет. Вторая фраза.")
@@ -46,7 +46,7 @@ class StreamingTests(unittest.TestCase):
                                   ("ПОИСК", [])):
             with self.subTest(content=content):
                 spoken = []
-                with patch("local_ai.urllib.request.urlopen", return_value=Response([
+                with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=Response([
                         {"message": {"content": content}, "done": True}])):
                     local_ai.LocalAI({}).ask("Поговорим?", on_sentence=spoken.append)
                 self.assertEqual(spoken, expected)
@@ -56,7 +56,7 @@ class StreamingTests(unittest.TestCase):
         def packets():
             yield {"message": {"content": "Привет. Незаконченный"}}
             raise OSError("Connection lost")
-        with patch("local_ai.urllib.request.urlopen", return_value=Response(packets())):
+        with patch("capri.ai.providers.ollama_chat.urllib.request.urlopen", return_value=Response(packets())):
             answer = local_ai.LocalAI({}).ask("Поговорим?", on_sentence=spoken.append)
         self.assertEqual(spoken, ["Привет."])
         self.assertEqual(answer, "Привет.")
@@ -68,8 +68,8 @@ class VoiceSpeedTests(unittest.TestCase):
         clock = [0]
         with patch.object(speaker, "_edge", side_effect=[RuntimeError("No audio"), False]) as edge, \
                 patch.object(speaker, "_sapi", return_value=False) as sapi, \
-                patch("voice.os.path.isfile", return_value=False), \
-                patch("voice.time.monotonic", side_effect=lambda: clock[0]):
+                patch("capri.audio.voice_service.os.path.isfile", return_value=False), \
+                patch("capri.audio.voice_service.time.monotonic", side_effect=lambda: clock[0]):
             speaker.say("Первая фраза.")
             clock[0] = 1
             speaker.say("Вторая фраза.")
@@ -83,7 +83,7 @@ class VoiceSpeedTests(unittest.TestCase):
     def test_cached_voice_is_used_even_during_service_outage(self):
         speaker = voice.Speaker({})
         speaker._edge_retry_at = float("inf")
-        with patch("voice.os.path.isfile", return_value=True), \
+        with patch("capri.audio.voice_service.os.path.isfile", return_value=True), \
                 patch.object(speaker, "_edge", return_value=False) as edge, \
                 patch.object(speaker, "_sapi") as sapi:
             speaker.say("Готовая фраза.")
@@ -95,7 +95,7 @@ class VoiceSpeedTests(unittest.TestCase):
         def fail(text):
             speaker.stop()
             raise RuntimeError("No audio")
-        with patch("voice.os.path.isfile", return_value=False), \
+        with patch("capri.audio.voice_service.os.path.isfile", return_value=False), \
                 patch.object(speaker, "_edge", side_effect=fail), patch.object(speaker, "_sapi") as sapi:
             self.assertTrue(speaker.say("Перебитая фраза."))
         sapi.assert_not_called()
@@ -114,7 +114,7 @@ class VoiceSpeedTests(unittest.TestCase):
 
 class FastShuffleTests(unittest.TestCase):
     def test_natural_shuffle_commands_do_not_need_ai_or_google(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             app = Actions({}, ".", None)
         for command in ("shuffle", "перемешай мои песни", "перемешай музыку", "шаффл"):
             with self.subTest(command=command), patch.object(app, "_set_playback_mode", return_value=True) as mode:

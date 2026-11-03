@@ -2,8 +2,8 @@ import datetime
 import unittest
 from unittest.mock import patch
 
-import weather
-from web_search import WebSearch
+from capri.services import weather_service as weather
+from capri.services.web_search import WebSearch
 
 
 class WeatherTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class WeatherTests(unittest.TestCase):
 
     def test_weather_avoids_search_snippets(self):
         sources = [{"title": "Weather", "url": "https://open-meteo.com/", "text": "Плюс 3 градуса.", "answer": "Плюс 3 градуса."}]
-        with patch("web_search.weather_sources", return_value=sources), patch.object(WebSearch, "_fetch") as search:
+        with patch("capri.services.web_search.weather_sources", return_value=sources), patch.object(WebSearch, "_fetch") as search:
             self.assertEqual(WebSearch().ask("Погода в Краснообске"), sources)
             search.assert_not_called()
 

@@ -3,13 +3,13 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 
-from actions import Actions
-from intent_router import Decision
+from capri.ai.intent_router import Decision
+from capri.automation.command_dispatcher import Actions
 
 
 class AppVolumeTests(unittest.TestCase):
     def setUp(self):
-        with patch("actions.AppIndex.build"):
+        with patch("capri.automation.command_dispatcher.AppIndex.build"):
             self.app = Actions({"app_aliases": {"говорилка": "chatclient"},
                                 "apps": {"игра": r"C:\Games\GamePlayer.exe"}}, ".", None)
         self.volumes = {}
@@ -27,7 +27,7 @@ class AppVolumeTests(unittest.TestCase):
         self.sessions_patch = patch("pycaw.pycaw.AudioUtilities.GetAllSessions", return_value=self.sessions)
         self.sessions_patch.start()
         self.addCleanup(self.sessions_patch.stop)
-        self.endpoint_patch = patch("actions._endpoint")
+        self.endpoint_patch = patch("capri.automation.command_dispatcher._endpoint")
         self.endpoint = self.endpoint_patch.start()
         self.addCleanup(self.endpoint_patch.stop)
 

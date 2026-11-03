@@ -38,8 +38,8 @@ flowchart TD
 
 В этой версии добавлены управление музыкой и громкостью отдельных программ, настройка гаммы монитора,
 команды «ночь» и «день», исправления прослушивания и более отзывчивая обработка запросов к ИИ.
-Список голосовых команд — в [КОМАНДЫ.md](КОМАНДЫ.md).
-Руководство по доработке и карта файлов — в [DEVELOPMENT.md](DEVELOPMENT.md).
+Список голосовых команд — в [docs/voice_commands.md](docs/voice_commands.md).
+Руководство по доработке и карта файлов — в [docs/development.md](docs/development.md).
 
 <h2 align="center">Этот проект сделан с помощью ИИ</h2>
 
@@ -79,7 +79,7 @@ flowchart TD
 
 > **Работает и без нейросети** — все команды доступны сразу после установки. Нейросеть нужна только для болтовни.
 
-Полный список фраз — в [КОМАНДЫ.md](КОМАНДЫ.md).
+Полный список фраз — в [docs/voice_commands.md](docs/voice_commands.md).
 
 ---
 
@@ -403,7 +403,7 @@ Claude умнее и видит свежие данные через веб-по
 Логика взаимодействия написана для текущего Qt-аватара.
 
 Исходные листы — `assets/motion_sources/`, кадры — `assets/anim/walk/` и `assets/anim/spin/`.
-Скрипт `tools/import_motion_sheets.py` повторно собирает кадры из готовых листов.
+Скрипт `tools/import_sprite_sheets.py` повторно собирает кадры из готовых листов.
 
 ### Лайки и появление
 
@@ -539,7 +539,7 @@ Claude умнее и видит свежие данные через веб-по
   `capri_roam.png` — поза для прогулок.
 - **Анимации** — кадры в `assets/anim/capri` (машет рукой) и `assets/anim/eyes` (пока думает). Свои — из видео:
   ```
-  python tools/convert_anim.py "видео.mp4" capri white
+  python tools/convert_animation_frames.py "видео.mp4" capri white
   ```
   Последнее слово — цвет фона в видео: `white`, `black` или `green`.
 </details>
@@ -547,12 +547,15 @@ Claude умнее и видит свежие данные через веб-по
 <details>
 <summary><b>Офлайн-голос Silero</b></summary>
 
-По умолчанию работает онлайн-Светлана. Дополнительный русский офлайн-вариант — Silero:
+По умолчанию работает Silero v5. Онлайн-Светлана доступна через `tts_engine: "edge"`.
+Клонирование по своим записям с обработкой B: [установка и настройка](docs/voice-clone.md).
+Для Silero:
 ```
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 и в `config.json`: `"tts_engine": "silero"`, `"silero_voice": "kseniya"` (или `xenia`, `baya`).
-Модель (~40 МБ) скачается сама. Лицензия Silero — только для некоммерческого использования.
+Модель v5 (~145 МБ) включена в Windows-сборку; при запуске из исходников установи её через `setup_voice.bat`.
+Лицензия Silero — только для некоммерческого использования.
 </details>
 
 ---
@@ -580,6 +583,10 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 ---
 
+## MAINFRAME, экран и задания
+
+В меню трея появилась панель MAINFRAME: локальные модели и дополнительные API, окна и значки как опоры, редактируемые `personality.md` / `me.md`, выбранные файлы, просмотр экрана, задания с журналом, паузой и расписанием. Озвучка оставлена существующая. [Как пользоваться и собрать автономный EXE](docs/user_guide.md).
+
 ## Приватность
 
 - Распознавание речи — офлайн (Vosk). С `use_google_stt` фраза после имени уточняется через Google.
@@ -605,3 +612,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
   <sub>Некоммерческий фан-проект. Персонаж Капри и вселенная Cyberpunk: Edgerunners принадлежат их правообладателям.<br>
   Модель распознавания речи в папке <code>bundled</code> — <a href="https://alphacephei.com/vosk/models">Vosk vosk-model-small-ru-0.22</a> от Alpha Cephei, лицензия Apache 2.0.</sub>
 </p>
+
+
+## Структура исходников
+
+Приложение находится в пакете `capri/`; корневой `main.py` только запускает его. Скрипты сборки и установки — в `tools/`, документация — в `docs/`, проверки — в `tests/`. [Карта архитектуры и переименованных файлов](docs/architecture.md).

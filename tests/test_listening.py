@@ -1,14 +1,14 @@
 """Сценарии обращения по имени и остановки без микрофона, сети и интерфейса."""
 import copy
-import time
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
-import main
-from actions import Actions, Reply
-from intent_router import Decision
-from request_planner import RequestPlan
+from capri.ai.intent_router import Decision
+from capri.ai.request_planner import RequestPlan
+from capri.app import controller as main
+from capri.automation.command_dispatcher import Actions, Reply
 
 
 class ListeningTests(unittest.TestCase):
@@ -64,7 +64,7 @@ class ListeningTests(unittest.TestCase):
     def test_edit_request_prefills_last_text_and_replaces_queued_job(self):
         self.capri.text_command("старый запрос")
         view = Mock(editing_request=False, mode="idle", hide_after=12)
-        with patch("main.QInputDialog") as make:
+        with patch("capri.app.controller.QInputDialog") as make:
             dialog = make.return_value
             dialog.exec.return_value = 1
             dialog.textValue.return_value = "  исправленный запрос  "
@@ -79,7 +79,7 @@ class ListeningTests(unittest.TestCase):
         for accepted, text in ((0, "новый запрос"), (1, "   ")):
             self.capri.text_command("старый запрос")
             view = Mock(editing_request=False, mode="idle", hide_after=12)
-            with patch("main.QInputDialog") as make:
+            with patch("capri.app.controller.QInputDialog") as make:
                 make.return_value.exec.return_value = accepted
                 make.return_value.textValue.return_value = text
                 self.capri.edit_request(view)
@@ -119,14 +119,14 @@ class ListeningTests(unittest.TestCase):
 
     def setUp(self):
         cfg = copy.deepcopy(main.DEFAULTS)
-        cfg.update(local_ai=False, use_google_stt=False, intent_router=False)
+        cfg.update(local_ai=False, use_google_stt=False, intent_router=False, speak_wake_ack=True)
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), \
                 patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             self.capri = main.Capri(cfg)
-        sound = patch("main.play_sound_async")
+        sound = patch("capri.app.controller.play_sound_async")
         sound.start()
         self.addCleanup(sound.stop)
-        stop_audio = patch("main.stop_sound")
+        stop_audio = patch("capri.app.controller.stop_sound")
         stop_audio.start()
         self.addCleanup(stop_audio.stop)
         self.capri.web = Mock()
@@ -265,12 +265,12 @@ class ListeningTests(unittest.TestCase):
 
     def test_name_appears_with_sound_before_command_processing(self):
         self.capri.glitch_wav = "appearance.wav"
-        with patch("main.play_sound_async") as sound, patch.object(self.capri, "_ask_ai") as ai:
+        with patch("capri.app.controller.play_sound_async") as sound, patch.object(self.capri, "_ask_ai") as ai:
             self.capri.on_partial("капри")
             self.assertIn("listening", self.modes)
             sound.assert_called_once_with("appearance.wav")
             ai.assert_not_called()
-        self.assertTrue(self.capri.jobs.empty())
+        self.assertEqual(self.capri.jobs.get_nowait()[0], "wake")
 
     def test_bare_name_is_acknowledged_and_opens_full_command_window(self):
         self.capri.on_partial("капри")
@@ -280,6 +280,127 @@ class ListeningTests(unittest.TestCase):
         self.assertGreater(self.capri.awake_until, time.time() + 7)
         self.assertEqual(self.modes[-1], "listening")
         self.capri.actions.handle.assert_not_called()
+
+    def test_wake_is_silent_by_default_and_still_listens_for_command(self):
+        self.assertFalse(main.DEFAULTS['speak_wake_ack'])
+        self.capri.cfg['speak_wake_ack'] = False
+        subtitles = []
+        self.capri.subtitle.connect(subtitles.append)
+        self.capri.on_partial('капри')
+        self.capri.on_final('капри', b'name')
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.say.assert_not_called()
+        self.assertIn('Слушаю…', subtitles)
+        self.assertEqual(self.modes[-1], 'listening')
+        self.assertGreater(self.capri.awake_until, time.time()+7)
+
+    def test_silent_wake_does_not_generate_unused_acknowledgement(self):
+        self.capri.cfg['speak_wake_ack'] = False
+        self.capri.speaker.engine = 'qwen_clone'
+        self.capri._prewarm_voice()
+        self.capri.speaker.prepare.assert_not_called()
+        self.capri.speaker.qwen.warmup.assert_called_once()
+
+    def test_partial_name_acknowledges_without_waiting_for_final(self):
+        self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.say.assert_called_once_with("Слушаю…")
+        self.capri.on_final("капри",b"name")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_repeated_partial_name_does_not_cut_off_early_acknowledgement(self):
+        self.capri.listener = Mock()
+        self.capri.speaker.say.side_effect = lambda text:self.capri.on_partial("капри")
+        self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.stop.assert_not_called()
+        self.capri.listener.reset_req.set.assert_not_called()
+
+    def test_command_partial_supersedes_unplayed_wake_acknowledgement(self):
+        self.capri.on_partial("капри")
+        self.capri.on_partial("капри открой ютуб")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.say.assert_not_called()
+        self.capri.on_final("капри открой ютуб",b"whole command")
+        job = self.capri.jobs.get_nowait()
+        self.assertEqual(job[1:3],("открой ютуб",b"whole command"))
+
+    def test_name_with_command_does_not_insert_voice_acknowledgement(self):
+        self.capri.on_partial("капри открой ютуб")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_late_final_name_does_not_interrupt_early_acknowledgement(self):
+        self.capri.speaker.say.side_effect = lambda text:self.capri.on_final("капри",b"name")
+        self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.stop.assert_not_called()
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_early_ack_echo_after_name_is_not_sent_to_model(self):
+        self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.on_final("капри слушаю",b"echo")
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_acknowledgement_does_not_interrupt_itself_when_asr_keeps_name(self):
+        self.capri.speaker.playing = True
+        def speak(text):
+            self.capri.on_partial("капри слушаю")
+            self.capri.on_final("капри слушаю",b"echo")
+        self.capri.speaker.say.side_effect = speak
+        self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.stop.assert_not_called()
+        self.assertTrue(self.capri.jobs.empty())
+
+    def test_new_name_after_final_is_acknowledged_without_three_second_cooldown(self):
+        with patch("capri.app.controller.time.time",return_value=100):
+            self.capri.on_partial("капри")
+            self.capri._process(self.capri.jobs.get_nowait())
+            self.capri.on_final("капри",b"name")
+        with patch("capri.app.controller.time.time",return_value=101.1):
+            self.capri.on_partial("капри")
+            self.capri._process(self.capri.jobs.get_nowait())
+        self.assertEqual(self.capri.speaker.say.call_count,2)
+
+    def test_expired_wake_job_does_not_speak_late(self):
+        self.capri.on_partial("капри")
+        self.capri.awake_until = time.time()-1
+        self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.speaker.say.assert_not_called()
+
+    def test_wake_phrase_prewarm_starts_before_delayed_background_phrases(self):
+        from capri.core import cancellation
+        with patch("capri.app.controller.cancellation.wait",side_effect=cancellation.RequestCancelled):
+            with self.assertRaises(cancellation.RequestCancelled): self.capri._prewarm_voice()
+        self.capri.speaker.prepare.assert_called_once_with("Слушаю…")
+        self.capri.speaker.prewarm.assert_not_called()
+
+    def test_clone_startup_warms_worker_without_queuing_background_speech(self):
+        self.capri.speaker.engine = 'qwen_clone'
+        with patch('capri.app.controller.cancellation.wait') as wait:
+            self.capri._prewarm_voice()
+        self.capri.speaker.prepare.assert_called_once_with('Слушаю…')
+        self.capri.speaker.qwen.warmup.assert_called_once()
+        self.capri.speaker.prewarm.assert_not_called()
+        wait.assert_not_called()
+
+    def test_clone_stream_does_not_prepare_later_sentence_ahead_of_first(self):
+        class StreamAI(main.LocalAI):
+            def __init__(self):
+                self.history = []
+            def ask(self, question, on_sentence=None):
+                on_sentence('Первая фраза.')
+                on_sentence('Вторая фраза.')
+                return 'Первая фраза. Вторая фраза.'
+        self.capri.speaker.engine = 'qwen_clone'
+        self.capri.speaker.prepare.side_effect = AssertionError('Preparation blocks serial TTS')
+        spoken = []
+        answer = self.capri._ask_ai(StreamAI(), 'Вопрос', lambda: False,
+                                    on_sentence=lambda text: spoken.append(text))
+        self.assertEqual(answer, 'Первая фраза. Вторая фраза.')
+        self.assertEqual(spoken, ['Первая фраза.', 'Вторая фраза.'])
+        self.capri.speaker.prepare.assert_not_called()
 
     def test_command_can_interrupt_acknowledgement_without_name(self):
         self.capri.cfg["barge_in"] = False
@@ -688,6 +809,16 @@ class ListeningTests(unittest.TestCase):
             self.capri._process(self.capri.jobs.get_nowait())
             recognize.assert_called_once_with(b"audio")
 
+    def test_explicit_pc_command_runs_locally_even_without_token_economy(self):
+        self.capri.cfg.update(ai_mode="openai",openai_min_tokens=False)
+        self.capri.router = Mock()
+        self.capri.actions.is_fast_command.return_value = True
+        with patch.object(self.capri,"_ask_ai") as ai:
+            self.capri.text_command("открой блокнот")
+            self.capri._process(self.capri.jobs.get_nowait())
+        self.capri.actions.handle.assert_called_once_with("открой блокнот")
+        ai.assert_not_called()
+
     def test_voice_correction_is_applied_before_google_and_dispatch(self):
         self.capri.cfg["use_google_stt"] = True
         self.capri.actions.normalize_voice_command.side_effect = lambda cmd: "следующий трек" if cmd == "текст" else cmd
@@ -846,7 +977,7 @@ class ListeningTests(unittest.TestCase):
         self.capri.say = Mock(return_value=False)
         process = Mock()
         process.poll.return_value = None
-        with patch("main.updater.start_update", return_value=process) as start:
+        with patch("capri.app.controller.updater.start_update", return_value=process) as start:
             for _ in range(2):
                 self.capri.text_command("обновись")
                 self.capri._process(self.capri.jobs.get_nowait())
@@ -893,6 +1024,7 @@ class ListeningTests(unittest.TestCase):
 
     def test_partial_name_opens_window_but_timeout_closes_it(self):
         self.capri.on_partial("капри")
+        self.capri._process(self.capri.jobs.get_nowait())
         self.assertGreater(self.capri.awake_until, time.time())
         self.capri.awake_until = time.time() - 1
         self.capri.on_final("открой ютуб", b"audio")
