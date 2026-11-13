@@ -27,24 +27,46 @@ class MashaVoiceTests(unittest.TestCase):
             self.assertEqual(item["speed"].dtype, np.float32)
             self.assertEqual(item["style"].shape, (1, 256))
 
-    def test_glitches_insert_audio_without_removing_original_samples(self):
-        original = np.linspace(-.9, .9, 72000, dtype=np.float32)
-        processed = voice.light_stutter(original, amount=1, seed=3)
-        self.assertGreater(len(processed), len(original))
-        self.assertLessEqual(len(processed) - len(original), int(voice.FX_SR * .031))
-        self.assertTrue(np.isfinite(processed).all())
-        position = 0
-        for sample in processed:
-            if position < len(original) and sample == original[position]:
-                position += 1
-        self.assertEqual(position, len(original))
+    def test_double_mixes_complete_copy_with_exact_micro_delay(self):
+        original = np.random.default_rng(3).uniform(-.9, .9, 72000).astype(np.float32)
+        processed = voice.micro_double(original, amount=.4)
+        delay = round(voice.FX_SR * .0015)
+        expected = np.pad(original, (0, delay)) + .4 * np.pad(original, (delay, 0))
+        np.testing.assert_allclose(processed, expected / 1.4, atol=1e-7)
+        self.assertEqual(len(processed), len(original) + delay)
         self.assertLessEqual(float(np.max(abs(processed))), .901)
 
-    def test_short_or_disabled_glitches_leave_audio_alone(self):
+    def test_double_retains_final_speech_sample_and_delayed_tail(self):
+        original = np.zeros(100, dtype=np.float32)
+        original[-1] = 1
+        processed = voice.micro_double(original, .5)
+        self.assertAlmostEqual(float(processed[99]), 1 / 1.5)
+        self.assertAlmostEqual(float(processed[-1]), .5 / 1.5)
+        self.assertEqual(np.count_nonzero(processed), 2)
+
+    def test_disabled_double_and_zero_pitch_preserve_all_samples(self):
         original = np.ones(1000, dtype=np.float32)
-        self.assertIs(voice.light_stutter(original, 1), original)
-        original = np.ones(72000, dtype=np.float32)
-        self.assertIs(voice.light_stutter(original, 0), original)
+        self.assertIs(voice.micro_double(original, 0), original)
+        self.assertIs(voice.pitch_shift(original, 0), original)
+        empty = original[:0]
+        self.assertIs(voice.micro_double(empty, 1), empty)
+
+    def test_qwen_double_keeps_configured_volume_and_full_tail(self):
+        speaker = voice.Speaker({"tts_engine": "qwen_clone", "voice_glitch": .4,
+                                 "voice_volume": 20, "voice_fx": 0, "voice_shift": 0})
+        original = np.ones(1000, dtype=np.float32) * .1
+        with patch.object(speaker.qwen, "render"), \
+                patch.object(voice, "decode", return_value=original), \
+                patch.object(voice, "write_wav") as write:
+            speaker.render("test", "out.wav")
+        self.assertEqual(write.call_args.kwargs["volume"], speaker.volume)
+        self.assertEqual(len(write.call_args.args[1]), 1036)
+
+    def test_micro_double_invalidates_old_stutter_cache(self):
+        speaker = voice.Speaker({"tts_engine": "kokoro", "voice_glitch": .25})
+        current = speaker._cache_path("same phrase")
+        with patch.object(voice, "VOICE_DOUBLE_VERSION", "old-stutter"):
+            self.assertNotEqual(current, speaker._cache_path("same phrase"))
 
     def test_pitch_is_compensated_in_synthesis_speed(self):
         speaker = voice.Speaker({"tts_engine": "kokoro", "kokoro_voice": "masha", "voice_shift": 3,

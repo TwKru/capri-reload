@@ -49,8 +49,9 @@ class PointerTools(QObject):
     def _move(self, state):
         from PySide6.QtGui import QCursor
         try:
-            QCursor.setPos(QPoint(round(state["x"]),round(state["y"])))
-            self.moved.emit(state["x"],state["y"])
+            if not state.get("cancelled"):
+                QCursor.setPos(QPoint(round(state["x"]),round(state["y"])))
+                self.moved.emit(state["x"],state["y"])
         finally:
             state["ready"].set()
 
@@ -59,19 +60,25 @@ class PointerTools(QObject):
         if os.name != "nt" or QGuiApplication.platformName() == "offscreen":
             raise ValueError("Ввод агента доступен в обычном сеансе Windows.")
 
-    def click(self, x, y, action="click"):
+    def move(self, x, y):
         self.available()
         from PySide6.QtGui import QCursor
         state = {"x":x,"y":y,"ready":threading.Event()}
         self.move_requested.emit(state)
-        if not cancellation.wait_event(state["ready"],2):
-            raise ValueError("Указатель не перемещён")
+        try:
+            if not cancellation.wait_event(state["ready"],2):
+                raise ValueError("Указатель не перемещён")
+        finally:
+            state["cancelled"] = True
         cancellation.wait(.1)
         point = QCursor.pos()
         if abs(point.x()-x)>3 or abs(point.y()-y)>3:
             raise ValueError("Курсор переместился: клик отменён")
+
+    def click(self, x, y, action="click"):
+        self.move(x, y)
         user = ctypes.windll.user32
-        down, up = (8, 16) if action == "right_click" else (2, 4)
+        down, up = {"right_click": (8,16), "middle_click": (32,64)}.get(action, (2,4))
         for _ in range(2 if action == "double_click" else 1):
             cancellation.checkpoint()
             user.mouse_event(down, 0, 0, 0, 0)
@@ -83,10 +90,15 @@ class PointerTools(QObject):
         from capri.automation.window_input import type_text
         type_text(text, delay=.002)
 
-    def key(self, sequence):
-        self.available()
+    @staticmethod
+    def key_codes(sequence):
         aliases = {"CTRL":17,"ALT":18,"SHIFT":16,"WIN":91,"ENTER":13,"TAB":9,"ESC":27,
-                   "BACKSPACE":8,"DELETE":46,"SPACE":32,"HOME":36,"END":35,"LEFT":37,"UP":38,"RIGHT":39,"DOWN":40}
+                   "BACKSPACE":8,"DELETE":46,"SPACE":32,"HOME":36,"END":35,"LEFT":37,"UP":38,"RIGHT":39,"DOWN":40,
+                   "CONTROL":17,"ESCAPE":27,"RETURN":13,"SUPER":91,"META":91,"CMD":91,"COMMAND":91,
+                   "ARROWLEFT":37,"ARROWUP":38,"ARROWRIGHT":39,"ARROWDOWN":40,
+                   "PAGEUP":33,"PAGEDOWN":34,"PGUP":33,"PGDN":34,"INSERT":45,"CAPSLOCK":20,
+                   "PLUS":187,"MINUS":189}
+        aliases.update({f"F{i}":111+i for i in range(1,25)})
         keys = []
         for part in sequence.upper().split("+"):
             part = part.strip()
@@ -96,6 +108,11 @@ class PointerTools(QObject):
             keys.append(code)
         if not keys or len(keys) > 5:
             raise ValueError("Неверное сочетание")
+        return keys
+
+    def key(self, sequence):
+        self.available()
+        keys = self.key_codes(sequence)
         pressed = []
         try:
             for key in keys:
@@ -109,3 +126,23 @@ class PointerTools(QObject):
     def scroll(self, notches):
         self.available()
         ctypes.windll.user32.mouse_event(0x0800, 0, 0, ctypes.c_uint32(-120*int(notches)).value, 0)
+
+    def scroll_pixels(self, dx, dy):
+        self.available()
+        for amount, flag in ((dy,0x0800),(dx,0x1000)):
+            if amount:
+                ticks = max(1, round(abs(amount)/100)) * (1 if amount > 0 else -1)
+                ctypes.windll.user32.mouse_event(flag,0,0,ctypes.c_uint32(ticks*120*(-1 if flag==0x0800 else 1)).value,0)
+
+    def drag(self, points):
+        self.available()
+        self.move(*points[0])
+        user = ctypes.windll.user32
+        cancellation.checkpoint()
+        user.mouse_event(2,0,0,0,0)
+        try:
+            for point in points[1:]:
+                cancellation.checkpoint()
+                self.move(*point)
+        finally:
+            user.mouse_event(4,0,0,0,0)

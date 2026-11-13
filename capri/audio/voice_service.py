@@ -186,7 +186,7 @@ class Listener(threading.Thread):
 
             device = resolve_device(self.device_name)
             try:
-                stream = sd.RawInputStream(samplerate=RATE, blocksize=1600, dtype="int16", channels=1,
+                stream = sd.RawInputStream(samplerate=RATE, blocksize=800, dtype="int16", channels=1,
                                            callback=callback, device=device)
             except Exception as e:
                 if device is not None:  # выбранный микрофон не открылся — пробуем микрофон по умолчанию
@@ -359,6 +359,12 @@ def decode(path, sr=FX_SR):
     import subprocess
 
     import numpy as np
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) == (1, 2, sr, "NONE"):
+                return np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").astype(np.float32) / 32768
+    except (wave.Error, EOFError):
+        pass
     raw = subprocess.run([_ffmpeg(), "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(sr), "-"],
                          capture_output=True, check=True, timeout=30, creationflags=0x08000000).stdout
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768
@@ -431,29 +437,21 @@ def _pct(value):
     return int(m.group(1)) if m else 0
 
 
-def light_stutter(x, amount=.25, seed=None):
-    """Rare 30 ms repeats: add a short fragment without cutting any original speech."""
+VOICE_DOUBLE_VERSION = "micro-double-1.5ms-v1"
+
+
+def micro_double(x, amount=.25):
+    """Mix a continuous 1.5 ms delayed copy, retaining the complete delayed tail."""
     import numpy as np
-    probability = max(0.0, min(1.0, float(amount)))
-    if probability == 0 or len(x) < FX_SR * 1.2:
+    gain = max(0.0, min(1.0, float(amount)))
+    if gain == 0 or len(x) == 0:
         return x
-    rnd = np.random.default_rng(seed)
-    if rnd.random() >= probability:
-        return x
-    size = int(FX_SR * .030)
-    candidates = rnd.integers(len(x) // 4, len(x) * 3 // 4, size=6)
-    at = int(max(candidates, key=lambda pos: float(np.mean(x[pos:pos + size] ** 2))))
-    # Start at a zero crossing, then soften the inserted fragment's edges.
-    start = max(0, at - 80)
-    window = x[start:at + 80]
-    nearby = np.flatnonzero(window[:-1] * window[1:] <= 0) + 1
-    if len(nearby):
-        at = start + int(nearby[np.argmin(abs(nearby - (at - start)))])
-    fragment = x[at:at + size].copy() * .75
-    fade = int(FX_SR * .003)
-    fragment[:fade] *= np.linspace(0, 1, fade, dtype=np.float32)
-    fragment[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
-    return np.concatenate((x[:at + size], fragment, x[at + size:]))
+    delay = round(FX_SR * .0015)
+    mixed = np.zeros(len(x) + delay, dtype=np.float32)
+    mixed[:len(x)] = x
+    mixed[delay:] += x * gain
+    mixed /= 1 + gain
+    return mixed
 
 
 def lively_semitones(sentences, base, rnd, lively=True):
@@ -478,6 +476,8 @@ def lively_semitones(sentences, base, rnd, lively=True):
 def pitch_shift(x, semitones):
     """Повышает тон передискретизацией (заодно ускоряя; скорость заранее занижена в синтезаторе)."""
     import numpy as np
+    if semitones == 0 or len(x) < 2:
+        return x
     factor = 2 ** (semitones / 12)
     pos = np.arange(0, len(x) - 1, factor)
     return np.interp(pos, np.arange(len(x)), x).astype(np.float32)
@@ -520,21 +520,28 @@ def silero_model():
         return _silero
 
 
-def silero_prosody(sentence, base, rnd, lively=True):
+def silero_prosody(sentence, base, rnd, lively=True, mood="neutral"):
     """Высота и скорость для фразы в разметке Silero (x-low … x-high)."""
     levels = ["x-low", "low", "medium", "high", "x-high"]
     i = levels.index(base) if base in levels else 3
     rate = "medium"
     if lively:
         end = sentence.rstrip()
-        if end.endswith("!"):
-            i, rate = i + 1, "fast"
+        words = end.lower().replace("ё", "е")
+        if mood in ("angry", "hurt") or re.search(r"\b(?:обидно|обиделась|злюсь|сердита|сердишь|хватит|прекрати|блядь|блять|пиздец|ебать|хуйня|нахуй|заебись)\b", words):
+            i, rate = i - 1, "fast"
+        elif re.search(r"\b(?:жаль|грустно|расстроилась)\b", words):
+            i, rate = i - 1, "slow"
+        elif end.endswith("!"):
+            i, rate = i + 2, "fast"
         elif end.endswith("?"):
-            i += 1
+            i += 2
         elif end.endswith("…") or end.endswith("..."):
             i, rate = i - 1, "slow"
-        elif rnd.random() < 0.35:
-            i += rnd.choice((-1, 1))
+        elif mood == "happy":
+            i, rate = i + 1, "fast"
+        else:
+            i += 1  # Warm, engaged delivery for ordinary statements too.
     return levels[max(0, min(4, i))], rate
 
 
@@ -601,25 +608,41 @@ def render_windows_voice(text, path, stop_event, timeout=45):
 
 class Speaker:
     def __init__(self, cfg):
+        self._voice_context = threading.local()
         self.voice = cfg.get("voice", "ru-RU-SvetlanaNeural")
         self.rate = cfg.get("voice_rate", "+5%")
         self.pitch = cfg.get("voice_pitch", "+8Hz")
-        local_profile = cfg.get("tts_engine") in ("kokoro", "silero", "qwen_clone")
+        local_profile = cfg.get("tts_engine") in ("kokoro", "silero", "qwen_clone", "colab")
         self.fx = float(cfg.get("voice_fx", 0.0 if local_profile else 1.0))  # 0 — чистый голос, 1 — цифровой голос Капри
         self.lively = bool(cfg.get("voice_lively", not local_profile))  # у каждой фразы своя высота
         self.shift = float(cfg.get("voice_shift", 0.0 if local_profile else 2.0))      # общий подъём тона в полутонах
         self.kokoro_speed = max(.5, min(2.0, float(cfg.get("kokoro_speed", 1.0))))
         self.kokoro_voice = cfg.get("kokoro_voice", "capri")
         self.glitch = max(0.0, min(1.0, float(cfg.get("voice_glitch", 0.0))))
+        from capri.audio.voice_library import VoiceLibrary
+        from capri.audio.emotion_bank import EmotionBank
+        self.emotions = EmotionBank(cfg.get("voice_emotions_path") or RESOURCE_ROOT / "bundled/emotions")
+        try:
+            self.voice_library = VoiceLibrary(cfg.get("voice_library_path"))
+        except (OSError, ValueError, KeyError, wave.Error):
+            log.exception("Не удалось загрузить библиотеку голоса; используется обычный синтез")
+            self.voice_library = VoiceLibrary()
         self.kokoro = None
         if cfg.get("tts_engine") == "kokoro":
             from capri.audio.kokoro_backend import KokoroClient
             self.kokoro = KokoroClient(threads=cfg.get("kokoro_threads", 2), variant=self.kokoro_voice)
         self.engine = cfg.get("tts_engine", "edge")          # kokoro/silero — локально, edge — онлайн
         self.qwen = None
+        if self.engine == "colab":
+            from capri.audio.colab_backend import ColabVoiceClient
+            self.qwen = ColabVoiceClient(cfg.get("colab_tts_url", ""), cfg.get("colab_tts_password", ""),
+                                         cfg.get("colab_voice_id", ""))
         if self.engine == "qwen_clone":
             from capri.audio.qwen_cli_backend import QwenCliClient
-            self.qwen = QwenCliClient(threads=cfg.get("qwen_threads", 6))
+            self.qwen = QwenCliClient(threads=cfg.get("qwen_threads", 6),device=cfg.get("qwen_device","auto"),
+                                      context_size=cfg.get("qwen_context_size",4096),
+                                      voice_preset=cfg.get("qwen_voice_preset","default"),
+                                      processing=cfg.get("qwen_voice_processing","layered_b"))
         self.silero_voice = cfg.get("silero_voice", "baya")
         self.silero_pitch = cfg.get("silero_pitch", "medium")
         self.silero_speed = max(.7,min(1.3,float(cfg.get("silero_speed",.92))))
@@ -654,11 +677,36 @@ class Speaker:
         self._edge_failures = 0
         self._edge_retry_at = 0.0
 
-    def say(self, text):
+    def say(self, text, mood="neutral"):
+        previous = getattr(self._voice_context, "mood", "neutral")
+        mood = "angry" if mood == "hurt" else mood
+        self._voice_context.mood = mood if mood in ("neutral", "happy", "angry", "bored") else "neutral"
+        try:
+            return self._say(text)
+        finally:
+            self._voice_context.mood = previous
+
+    def _say(self, text):
         """Блокирует поток до конца фразы. Возвращает True, если речь перебили."""
         cancellation.checkpoint()
         self.stop_event.clear()
         cancellation.checkpoint()
+        emotion, remaining = self.emotions.prefix(text)
+        if emotion:
+            with tempfile.TemporaryDirectory(prefix="capri_emotion_") as folder:
+                audio = pitch_shift(decode(str(emotion)), self.shift)
+                audio = micro_double(audio, self.glitch)
+                path = os.path.join(folder, "emotion.wav")
+                write_wav(path, audio, volume=self.volume)
+                self.playing = True
+                try:
+                    if self.stop_event.is_set() or play_mp3(path, self.stop_event, self.volume):
+                        return True
+                finally:
+                    self.playing = False
+            text = remaining
+        if self.stop_event.is_set():
+            return True
         text = clean_for_speech(text)
         if not text:
             return False
@@ -743,7 +791,7 @@ class Speaker:
             audio = pitch_shift(trim_silence(decode(dst)), shift)
             if fx > 0:
                 audio = fx_process(audio, fx)
-            audio = light_stutter(audio, glitch)
+            audio = micro_double(audio, glitch)
             write_wav(dst, audio)
         return dst
 
@@ -767,8 +815,9 @@ class Speaker:
                 cancellation.checkpoint()
                 if self.stop_event.is_set():
                     raise InterruptedError("Speech cancelled")
-                pitch, rate = silero_prosody(s, self.silero_pitch, rnd, self.lively)
-                speed = self.silero_speed * {"medium":1.,"fast":1.10,"slow":.90}[rate] / (2**(self.shift/12))
+                pitch, rate = silero_prosody(s, self.silero_pitch, rnd, self.lively,
+                                           getattr(self._voice_context, "mood", "neutral"))
+                speed = self.silero_speed * {"medium":1.,"fast":1.16,"slow":.82}[rate] / (2**(self.shift/12))
                 ssml = f'<speak><prosody pitch="{pitch}" rate="{round(speed*100)}%">{html.escape(s)}</prosody></speak>'
                 audio = model.apply_tts(ssml_text=ssml, speaker=self.silero_voice, sample_rate=FX_SR,
                                        put_accent=True, put_yo=True)
@@ -785,20 +834,29 @@ class Speaker:
         if self.fx > 0:
             x = fx_process(x, self.fx)
         if self.glitch:
-            x = light_stutter(x,self.glitch)
+            x = micro_double(x,self.glitch)
         write_wav(dst, x, volume=self.volume)
         return dst
 
     def render(self, text, dst):
         """Синтез в файл; возвращает путь к готовому звуку."""
-        if self.engine == "qwen_clone":
+        library = getattr(self, "voice_library", None)
+        recording = library.find(text) if library else None
+        if recording:
+            audio = pitch_shift(decode(str(recording)), self.shift)
+            if self.fx > 0:
+                audio = fx_process(audio, self.fx)
+            audio = micro_double(audio, self.glitch)
+            write_wav(dst, audio, volume=self.volume)
+            return dst
+        if self.engine in ("qwen_clone", "colab"):
             self.qwen.render(text, dst, self.stop_event, volume=self.volume)
             if self.shift or self.fx > 0 or self.glitch > 0:
                 audio = pitch_shift(decode(dst), self.shift)
                 if self.fx > 0:
                     audio = fx_process(audio, self.fx)
-                audio = light_stutter(audio, self.glitch)
-                write_wav(dst, audio)  # volume was already applied by the clone backend
+                audio = micro_double(audio, self.glitch)
+                write_wav(dst, audio, volume=self.volume)
             return dst
         if self.engine == "kokoro":
             return self.render_kokoro(text, dst)
@@ -870,13 +928,16 @@ class Speaker:
     def _cache_path(self, text):
         import hashlib
         backend = (f"kokoro-ru-v2:{self.kokoro_voice}:{self.kokoro_speed}:{self.glitch}"
-                   if self.engine == "kokoro" else f"silero-v5:{self.silero_pitch}:{self.silero_speed}:{self.glitch}"
+                   if self.engine == "kokoro" else f"silero-v5-expressive-5:{self.silero_pitch}:{self.silero_speed}:{self.glitch}:{getattr(self._voice_context, 'mood', 'neutral')}"
                    if self.engine == "silero" else self.engine)
         if self.engine == "qwen_clone":
             from capri.audio.clone_effects import EFFECT_VERSION
             backend = f"qwen-q8-b12069:{self.qwen.profile_id}:{EFFECT_VERSION}:{self.glitch}"
             backend += f":{self.qwen.cache_revision}"
-        key = "|".join(map(str, (text, backend, self.voice, self.rate, self.pitch, self.shift, self.lively,
+        elif self.engine == "colab":
+            backend = f"{self.qwen.cache_revision}:{self.qwen.profile_id}:{self.glitch}"
+        library_revision = getattr(getattr(self, "voice_library", None), "revision", "disabled")
+        key = "|".join(map(str, (VOICE_DOUBLE_VERSION, library_revision, text, backend, self.voice, self.rate, self.pitch, self.shift, self.lively,
                                  self.fx, self.volume, self.silero_voice)))
         return os.path.join(TTS_CACHE, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".wav")
 
@@ -936,7 +997,8 @@ class Speaker:
         log.info("Постоянные фразы озвучены заранее")
 
     def _edge(self, text):
-        if self.engine == "qwen_clone" and len(text) > 110:
+        chunk_limit = 60 if self.engine == "colab" else 110
+        if self.engine in ("qwen_clone", "colab") and len(text) > chunk_limit and not self.voice_library.find(text):
             return self._qwen_sentences(text)
         # Отдельная папка на каждую фразу, включая предзагрузку. Держим её до конца воспроизведения.
         with tempfile.TemporaryDirectory(prefix="capri_tts_") as folder:
@@ -954,7 +1016,7 @@ class Speaker:
         from concurrent.futures import ThreadPoolExecutor
 
         from capri.audio.qwen_backend import speech_chunks
-        chunks = list(speech_chunks(text))
+        chunks = list(speech_chunks(text, first_limit=60 if self.engine == "colab" else None))
         # Playback waits for one phrase, never for the complete long answer.
         with tempfile.TemporaryDirectory(prefix="capri_clone_") as folder:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="capri-voice-next") as pool:

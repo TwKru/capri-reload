@@ -108,7 +108,8 @@ class ScriptedBankTests(unittest.TestCase):
     def test_random_selection_reaches_all_ten_variants_and_keeps_volume(self):
         replies = []
         for index in range(10):
-            with patch("capri.ai.persona.system_prompts.random.choice", side_effect=lambda values, i=index: values[i]):
+            with patch.object(persona, "_CASUAL_TURN", 0), \
+                    patch("capri.ai.persona.system_prompts.random.choice", side_effect=lambda values, i=index: values[i]):
                 replies.append(persona.line("vol_set", n=37))
         self.assertEqual(len(set(replies)), 10)
         self.assertTrue(all("37" in reply for reply in replies))

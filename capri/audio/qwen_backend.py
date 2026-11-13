@@ -26,21 +26,25 @@ MODEL_FILES = {
 }
 
 
-def speech_chunks(text, limit=110):
+def speech_chunks(text, limit=110, first_limit=None):
     """Sentence boundaries first; every word survives long or unpunctuated replies."""
+    current_limit = first_limit or limit
     for sentence in re.split(r'(?<=[.!?…])\s+', ' '.join(text.split())):
-        while len(sentence) > limit:
-            cut = sentence.rfind(' ', 0, limit + 1)
-            cut = cut if cut > 0 else limit
+        while len(sentence) > current_limit:
+            cut = sentence.rfind(' ', 0, current_limit + 1)
+            cut = cut if cut > 0 else current_limit
             yield sentence[:cut]
+            current_limit = limit
             sentence = sentence[cut:].lstrip()
         if sentence:
             yield sentence
+            current_limit = limit
 
 
 class QwenClient:
-    def __init__(self, threads=6, folder=FOLDER):
+    def __init__(self, threads=6, folder=FOLDER, reference_folder=None):
         self.folder = Path(folder)
+        self.reference_folder = Path(reference_folder) if reference_folder is not None else self.folder
         self.threads = max(1, min(6, int(threads)))
         self.process = None
         self.job = None
@@ -50,7 +54,7 @@ class QwenClient:
         self.key = None
         self.reference = None
         self.target = None
-        profile = self.folder / 'voice-profile.json'
+        profile = self.reference_folder / 'voice-profile.json'
         self.profile = json.loads(profile.read_text(encoding='utf-8')) if profile.exists() else {}
         self.profile_id = self.profile.get('sha256', 'missing')
         # Ignore system proxies even if Windows has a proxy configured.
@@ -133,7 +137,7 @@ class QwenClient:
     def verify_files(self):
         if self.reference is not None:
             return
-        if not self.profile or not (self.folder / 'voice-reference.wav').exists():
+        if not self.profile or not (self.reference_folder / 'voice-reference.wav').exists():
             raise FileNotFoundError('Не установлен образец голоса: запусти setup_clone_voice.bat')
         for name, (size, _) in MODEL_FILES.items():
             if not (self.folder / name).exists() or (self.folder / name).stat().st_size != size:
@@ -143,7 +147,7 @@ class QwenClient:
             with (self.folder / name).open('rb') as file:
                 if hashlib.file_digest(file, 'sha256').hexdigest() != expected:
                     raise ValueError('Voice runtime checksum mismatch: ' + name)
-        reference = (self.folder / 'voice-reference.wav').read_bytes()
+        reference = (self.reference_folder / 'voice-reference.wav').read_bytes()
         if hashlib.sha256(reference).hexdigest() != self.profile_id:
             raise ValueError('Voice reference checksum mismatch')
         self.target = self.profile['spectrum']
@@ -151,8 +155,8 @@ class QwenClient:
 
     def launch(self, args):
         flags = 0x08004000 if os.name == 'nt' else 0
-        self.process = subprocess.Popen(args, cwd=self.folder, stdout=self.logfile,
-                                        stderr=subprocess.STDOUT, creationflags=flags)
+        self.process = subprocess.Popen(args, cwd=Path(args[0]).parent, stdout=self.logfile,
+                                        stderr=subprocess.STDOUT, creationflags=flags,env=getattr(self,"process_env",None))
         try:
             if os.name == 'nt':
                 import win32job

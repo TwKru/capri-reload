@@ -1,3 +1,4 @@
+import random
 import tempfile
 import threading
 import unittest
@@ -12,6 +13,25 @@ from capri.config.defaults import DEFAULTS
 
 
 class SileroV5Tests(unittest.TestCase):
+    def test_plain_answers_are_always_expressive_and_mood_changes_delivery(self):
+        for seed in range(10):
+            self.assertEqual(voice.silero_prosody("Я тебя услышала.", "medium", random.Random(seed)),
+                             ("high", "medium"))
+        self.assertEqual(voice.silero_prosody("Я тебя услышала.", "medium", random.Random(0), mood="hurt"),
+                         ("low", "fast"))
+        self.assertEqual(voice.silero_prosody("Я тебя услышала.", "medium", random.Random(0), mood="angry"),
+                         ("low", "fast"))
+
+    def test_mood_cache_and_voice_context_are_isolated(self):
+        speaker = voice.Speaker(DEFAULTS)
+        normal = speaker._cache_path("Тот же текст.")
+        observed = []
+        with patch.object(speaker, "_say", side_effect=lambda text: observed.append(speaker._cache_path(text))):
+            speaker.say("Тот же текст.", mood="angry")
+            speaker.say("Тот же текст.", mood="hurt")
+        self.assertNotEqual(observed[0], normal)
+        self.assertEqual(observed[0], observed[1])
+        self.assertEqual(speaker._cache_path("Тот же текст."), normal)
     def test_model_is_v5_and_constructor_does_not_load_it_before_startup(self):
         with patch.object(voice,"silero_model") as load:
             speaker = voice.Speaker(DEFAULTS)

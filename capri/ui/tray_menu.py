@@ -53,6 +53,8 @@ def build_control_menu(capri, avatar, handlers, base):
     microphone.setCheckable(True)
     action(menu, "Остановить речь и обработку", capri.stop_listening)
     action(menu, "Спрятать Капри", avatar.vanish)
+    if "restart" in handlers:
+        action(menu, "Перезапустить Капри", handlers["restart"])
     menu.addSeparator()
 
     settings = menu.addMenu("Настройки")

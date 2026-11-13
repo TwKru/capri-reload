@@ -4,7 +4,19 @@ import sys
 
 
 def main():
-    if "--voice-worker" in sys.argv:
+    from capri.app.restart import WAIT_FLAG, wait_for_previous
+    if WAIT_FLAG in sys.argv:
+        index = sys.argv.index(WAIT_FLAG)
+        if index+1 >= len(sys.argv):
+            raise ValueError("Не указан процесс предыдущей копии Капри")
+        pid = sys.argv[index+1]
+        del sys.argv[index:index+2]
+        if not wait_for_previous(pid):
+            return
+    if "--setup-preview" in sys.argv:
+        from tools.preview_setup_wizard import render
+        render(sys.argv[sys.argv.index("--setup-preview")+1])
+    elif "--voice-worker" in sys.argv:
         from capri.audio.kokoro_backend import main as run_voice_worker
         run_voice_worker(sys.argv[2:])
     elif "--smoke-test" in sys.argv:
@@ -21,11 +33,8 @@ def main():
         voice_smoke(sys.argv[sys.argv.index("--tts-test")+1])
     elif os.name == "nt":
         if getattr(sys,"frozen",False):
-            import json
             from pathlib import Path
             base = Path(sys.executable).parent
-            if not (base/"config.json").exists():
-                (base/"config.json").write_text(json.dumps({"ai_mode":"openai","local_ai":False,"first_start_mainframe":True}),encoding="utf-8")
             from tools import install_vosk_model as download_model
             download_model.BASE = str(base)
             download_model.MODELS = str(base/"models")

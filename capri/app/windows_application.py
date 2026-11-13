@@ -2,11 +2,13 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from capri.app.controller import BASE, Capri, fatal
+from capri.app.restart import spawn_replacement
 from capri.automation.command_dispatcher import CAPRI_URL
 from capri.config.settings import apply_user, load_config
 from capri.desktop.avatar import Avatar
@@ -39,12 +41,24 @@ def main():
     collector = GuiGarbageCollector(app)
     apply_theme(app)
     app.setQuitOnLastWindowClosed(False)
+    config_missing = not (Path(BASE) / "config.json").exists()
     cfg = load_config()
+    if config_missing or cfg.get("setup_pending") or "--setup" in sys.argv:
+        from capri.config.settings import _edit_config
+        from capri.ui.setup_wizard import SetupWizard
+        if config_missing:
+            _edit_config(lambda data: data.update(setup_pending=True))
+        initial_mode = next((arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--setup-mode=")), None)
+        wizard = SetupWizard(cfg, initial_mode=initial_mode)
+        if not wizard.exec():
+            return
+        cfg = load_config()
 
     avatar = Avatar(os.path.join(BASE, "assets"))
     avatar.hide_after = float(cfg["hide_after_seconds"])
     apply_user(cfg)
     capri = Capri(cfg)
+    avatar.speech_active = lambda: bool(capri.speaker.playing)
     capri.enable_memory(os.path.join(BASE, "memory.json"))
     from capri.app.runtime_services import RuntimeServices
     extensions = capri.extensions = RuntimeServices(capri, avatar, BASE)
@@ -111,7 +125,7 @@ def main():
         show_window("sources", lambda: dialog)
 
     transition = ScreenTransition()
-    lifecycle = {"shutting_down": False, "started": False}
+    lifecycle = {"shutting_down": False, "started": False, "restart": False}
 
     def quit_with_animation():
         if lifecycle["shutting_down"]:
@@ -133,11 +147,19 @@ def main():
         for window in windows.values():
             window.close()
 
+    def restart_with_animation():
+        if lifecycle["shutting_down"]:
+            return
+        lifecycle["restart"] = True
+        quit_with_animation()
+
+    extensions.restart_requested.connect(restart_with_animation)
     menu = build_control_menu(capri, avatar, {
         "mainframe": extensions.show,
         "text": ask_text, "edit": lambda: capri.edit_request(avatar), "entries": open_entries,
         "profile": open_profile, "sound": open_sound, "ai": open_ai, "sources": show_sources,
         "github": lambda: capri.actions.web(CAPRI_URL), "quit": quit_with_animation,
+        "restart": restart_with_animation,
     }, BASE)
     tray = QSystemTrayIcon(tray_icon())
     tray.setToolTip("Капри — чип подключён · ПКМ: меню")
@@ -176,4 +198,8 @@ def main():
         result = app.exec()
     finally:
         collector.close()
+    if lifecycle["restart"]:
+        # aboutToQuit has already stopped speech, native workers and active tasks.
+        # The child waits for this PID before opening its microphone or interface.
+        spawn_replacement(BASE)
     sys.exit(result)

@@ -17,18 +17,23 @@ class JobStore:
                 created REAL NOT NULL, updated REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, job INTEGER NOT NULL, at REAL NOT NULL, text TEXT NOT NULL);
         """)
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")}
+        if "engine" not in columns:
+            self.connection.execute("ALTER TABLE jobs ADD COLUMN engine TEXT NOT NULL DEFAULT 'default'")
         self.connection.execute("UPDATE jobs SET status='paused',result='Приложение закрылось. Можно продолжить.' WHERE status IN ('running','queued')")
         self.connection.commit()
 
-    def create(self, request, due=None, repeat=0, max_steps=60, seconds=3600):
+    def create(self, request, due=None, repeat=0, max_steps=60, seconds=3600, engine="default"):
         request = request.strip()
         if not request or len(request) > 6000:
             raise ValueError("Опиши задачу (до 6000 символов).")
         if not 1 <= int(max_steps) <= 500 or not 15 <= int(seconds) <= 43200 or not 0 <= repeat <= 604800:
             raise ValueError("Неверные ограничения задания.")
+        if engine not in ("default", "computer_use"):
+            raise ValueError("Неизвестный режим задания")
         with self.lock, self.connection:
-            cursor = self.connection.execute("INSERT INTO jobs(request,status,due,repeat,max_steps,seconds,created,updated) VALUES(?,?,?,?,?,?,?,?)",
-                (request,"scheduled",due if due is not None else time.time(),repeat,max_steps,seconds,time.time(),time.time()))
+            cursor = self.connection.execute("INSERT INTO jobs(request,status,due,repeat,max_steps,seconds,created,updated,engine) VALUES(?,?,?,?,?,?,?,?,?)",
+                (request,"scheduled",due if due is not None else time.time(),repeat,max_steps,seconds,time.time(),time.time(),engine))
             return cursor.lastrowid
 
     def get(self, ident):

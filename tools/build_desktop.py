@@ -1,4 +1,5 @@
 """Автономная сборка с Python/Qt; личные файлы никогда не включаются."""
+import argparse
 import hashlib
 import json
 import os
@@ -10,13 +11,14 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 
 
-def build():
+def build(dist_dir=BASE/"dist", clean=False):
+    dist_dir = Path(dist_dir).resolve()
     sources = sorted([*BASE.glob("*.py"), *BASE.glob("capri/**/*.py"), *BASE.glob("tools/*.py")])
     before = {str(path.relative_to(BASE)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     args = [sys.executable,"-m","PyInstaller","--noconfirm","--windowed","--onedir",
-            "--contents-directory",".","--name","Capri","--distpath",str(BASE/"dist"),
+            "--contents-directory",".","--name","Capri","--distpath",str(dist_dir),
             "--workpath",str(BASE/"build"),"--specpath",str(BASE/"build")]
-    if "--clean" in sys.argv:
+    if clean:
         args += ["--clean"]
     for name in ("assets","bundled","media","third_party","docs"):
         if (BASE/name).exists():
@@ -35,8 +37,8 @@ def build():
     if any(hashlib.sha256((BASE/name).read_bytes()).hexdigest() != digest for name,digest in before.items()):
         raise RuntimeError("Исходники изменились во время сборки. Пересобери перед передачей пользователю.")
     platform = "Windows" if os.name == "nt" else "macOS" if sys.platform == "darwin" else "Linux"
-    archive = BASE/"dist"/f"Capri-{platform}.zip"
-    root = BASE/"dist"/"Capri"
+    archive = dist_dir/f"Capri-{platform}.zip"
+    root = dist_dir/"Capri"
     (root/"build-manifest.json").write_text(json.dumps(before,indent=2),encoding="utf-8")
     sys.path.insert(0,str(BASE))
     from capri.updates.source_updater import protected
@@ -48,4 +50,8 @@ def build():
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dist-dir", type=Path, default=BASE/"dist")
+    parser.add_argument("--clean", action="store_true")
+    args = parser.parse_args()
+    build(args.dist_dir, args.clean)

@@ -162,6 +162,7 @@ class Capri(QObject):
         self.cancel_scopes = weakref.WeakSet()
         self.jobs = cancellation.JobQueue(lambda: self.cancel_epoch)
         self.awake_until = 0.0
+        self.voice_wake_until = 0.0
         self.voice_paused = False
         self.answer_until = 0.0
         self.voice_generation = 0  # «стоп» отменяет голосовые задания, которые ещё обрабатываются
@@ -318,7 +319,7 @@ class Capri(QObject):
                 return
             except Exception:
                 log.exception("Не удалось прогреть клонированный голос")
-        if self.speaker.engine == "qwen_clone":
+        if self.speaker.engine in ("qwen_clone", "colab"):
             return  # The serial CPU worker stays available for the user's first reply.
         cancellation.wait(30)
         static = [gendered(t) for variants in LINES.values() for t in variants[:1] if "{" not in t]
@@ -453,6 +454,7 @@ class Capri(QObject):
             scope.cancel()
         self.last_activity = time.time()
         self.awake_until = 0.0
+        self.voice_wake_until = 0.0
         self.answer_until = 0.0
         self.interrupted = True
         self.speaker.stop()
@@ -483,6 +485,12 @@ class Capri(QObject):
         pending = callable(self.actions.pending)
         choice = isinstance(self.actions.choice, (list, tuple)) and bool(self.actions.choice)
         question = bool(re.search(r"\?(?=\s|$|[»”\"'…!])", str(text)))
+        if self.cfg.get("voice_requires_name", True):
+            self.voice_wake_until = self.awake_until = 0.0
+            # Сохраняем ожидаемое подтверждение, но ответ тоже требует имени.
+            self.answer_until = time.time() + float(self.cfg["listen_window_seconds"]) if ask or pending or choice or question else 0.0
+            self.mode.emit("idle", 0.0)
+            return
         if ask or pending or choice or question:
             seconds = float(self.cfg["listen_window_seconds"])
             self.answer_until = self.awake_until = time.time() + seconds
@@ -493,6 +501,9 @@ class Capri(QObject):
             self.mode.emit("idle", 0.0)
 
     def on_partial(self, text):
+        if self.cfg.get("voice_requires_name", True):
+            self._on_addressed_voice(text)
+            return
         if self.voice_paused:
             return
         if self.is_stop_command(text):
@@ -552,7 +563,65 @@ class Capri(QObject):
         self.partial_wake_serial = self.command_serial
         self.jobs.put(("wake", self.command_serial))
 
+    def _on_addressed_voice(self, text, audio=None):
+        """Имя выдаёт разрешение ровно на одну следующую голосовую фразу."""
+        if self.voice_paused:
+            return
+        now = time.time()
+        self.expire_answer(now)
+        match = self.wake_re.search(text.lower())
+        if match:
+            text = text[match.start():]  # речь до обращения не является командой
+        cmd = self.strip_wake(text, voice=True)
+        recent_speech = self.speaking or now-self.speech_end < 1.0
+        if recent_speech and (self.is_echo(text) or cmd and self.is_echo(cmd)):
+            return
+        addressed = now < self.voice_wake_until
+        if match and not addressed:
+            # Сначала отменяем старую работу. Отклик не ждёт HTTP/озвучку/очередь.
+            self.cancel_epoch += 1
+            self.jobs.discard_before(self.cancel_epoch)
+            with self.cancel_lock:
+                scopes = list(self.cancel_scopes)
+            for scope in scopes:
+                scope.cancel()
+            if self.speaking:
+                self.interrupted = True
+                self.speaker.stop()
+            self.command_serial += 1
+            self.partial_wake_serial = None
+            self.last_partial_wake = now
+            self.last_activity = now
+            self.voice_wake_until = self.awake_until = now + float(self.cfg["listen_window_seconds"])
+            self.appear(self.cfg["listen_window_seconds"])
+            self.subtitle.emit("Слушаю…")
+            if len(cmd) < 2:
+                self._queue_wake_ack()
+            log.info("Имя распознано: принимаю одну команду")
+            addressed = True
+        if not addressed:
+            return
+        if self.is_stop_command(text):
+            self.stop_listening()
+            return
+        self.voice_wake_until = self.awake_until = now + float(self.cfg["listen_window_seconds"])
+        if len(cmd) < 2:
+            return  # отдельное «Капри» не расходует разрешение на команду
+        if self.partial_wake_serial is not None:
+            self.partial_wake_serial = None
+            self.command_serial += 1
+        if self.acknowledging and self.speaking and not self.interrupted:
+            self.interrupt()
+        if audio is None:
+            return
+        self.voice_wake_until = self.awake_until = self.answer_until = 0.0
+        self.command_serial += 1
+        self.jobs.put(("voice", cmd, audio, True, self.voice_generation))
+
     def on_final(self, text, audio):
+        if self.cfg.get("voice_requires_name", True):
+            self._on_addressed_voice(text, audio)
+            return
         if self.voice_paused:
             return
         if self.is_stop_command(text):
@@ -657,7 +726,7 @@ class Capri(QObject):
             return
         self.config_mtime = mtime
         for key in ("sites", "apps", "app_aliases", "search_when_unsure", "browser", "chatter", "replies",
-                    "user_name_mode", "user_name", "user_gender", "personality", "speak_wake_ack"):
+                    "user_name_mode", "user_name", "user_gender", "personality", "speak_wake_ack", "voice_requires_name"):
             self.cfg[key] = fresh[key]
         self.sync_personality()
         self.actions.set_lists(self.cfg)
@@ -854,7 +923,7 @@ class Capri(QObject):
             if cancelled():
                 return
             # Первое предложение нужно сразу; следующие готовим, пока звучит предыдущее.
-            if received and self.speaker.engine != "qwen_clone":
+            if received and self.speaker.engine not in ("qwen_clone", "colab"):
                 self.speaker.prepare(text)
             received += 1
             sentences.put(text)
@@ -1008,6 +1077,10 @@ class Capri(QObject):
                     return
                 if better:
                     better = better.lower()
+                    if self.cfg.get("voice_requires_name", True):
+                        match = self.wake_re.search(better)
+                        # Повторная расшифровка не должна вернуть речь до обращения.
+                        better = self.strip_wake(better[match.start():], voice=True) if match else ""
                     if len(better) >= 2:
                         cmd = better
         else:
@@ -1207,7 +1280,21 @@ class Capri(QObject):
         self.interrupted = False
         self.speaking = True
         try:
-            self.speaker.say(text)
+            spoken = text
+            personality = getattr(self, "personality", None)
+            irritated = (getattr(personality, "strongly_hurt", False) is True or
+                         getattr(personality, "mood", "neutral") == "hurt")
+            if (irritated
+                    and not getattr(self, "acknowledging", False)):
+                from capri.audio.emotion_bank import EmotionBank
+                emotions = getattr(self.speaker, "emotions", None)
+                if isinstance(emotions, EmotionBank):
+                    spoken = emotions.angry_prefix(text, time.monotonic())
+            if isinstance(self.speaker, Speaker):
+                mood = "angry" if irritated else getattr(personality, "mood", "neutral")
+                self.speaker.say(spoken, mood=mood)
+            else:
+                self.speaker.say(spoken)
         finally:
             self.speaking = False
             self.speech_end = time.time()

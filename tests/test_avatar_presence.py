@@ -40,6 +40,7 @@ class AvatarPresenceTests(unittest.TestCase):
             view.set_subtitle("An answer")
             view.set_mode("speaking")
             self.assertTrue(view.dialogue_visible())
+            view._advance_subtitle(101)
             view.set_mode("idle")
         self.assertTrue(view.dialogue_visible(104.999))
         self.assertFalse(view.dialogue_visible(105))

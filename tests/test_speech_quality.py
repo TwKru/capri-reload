@@ -92,12 +92,18 @@ class SpeechQualityTests(unittest.TestCase):
 
 
 class CasualStyleTests(unittest.TestCase):
-    def test_casual_script_is_rare_and_preserves_target(self):
+    def test_command_templates_do_not_repeat_immediately(self):
+        with patch.dict(persona._LAST_LINES,{},clear=True),patch("capri.ai.persona.system_prompts.random.choice",side_effect=lambda values:values[0]):
+            replies = [persona.line("vol_set",n=37) for _ in range(12)]
+        self.assertTrue(all(left != right for left,right in zip(replies,replies[1:])))
+        self.assertTrue(all("37" in text for text in replies))
+
+    def test_casual_script_every_third_eligible_reply_preserves_target(self):
         target = "CS2 {name} 30"
         with patch.object(persona, "_CASUAL_TURN", 0), patch("capri.ai.persona.system_prompts.random.choice", side_effect=lambda values: values[0]):
             replies = [persona.line("open", t=target) for _ in range(24)]
         self.assertTrue(all(target in reply for reply in replies))
-        self.assertEqual(sum("блядь" in reply for reply in replies), 0)
+        self.assertEqual(sum("блядь" in reply for reply in replies), 8)
         self.assertEqual(len(persona.LINES["open"]), 10)
         self.assertNotIn("listen", persona.CASUAL_VARIANTS)
         self.assertNotIn("greet", persona.CASUAL_VARIANTS)
@@ -108,7 +114,8 @@ class CasualStyleTests(unittest.TestCase):
         for _ in range(24):
             self.assertNotIn("Блядь", person.command_line("roam", "default"))
         self.assertFalse(person.strongly_hurt)
-        self.assertIn("без мата", person.context())
+        self.assertIn("каждом третьем", person.context())
+        self.assertIn("не переходи на личные оскорбления", person.context())
 
 
 class UncensoredVoiceTests(unittest.TestCase):

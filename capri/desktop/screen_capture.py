@@ -37,15 +37,15 @@ class ScreenFrames(QObject):
             if image.isNull():
                 raise ValueError("Нет доступа к снимку экрана. Проверь разрешения системы.")
             rect = screen.geometry()
-            state["frame"] = encode_frame(image,(rect.x(),rect.y(),rect.width(),rect.height()))
+            state["frame"] = encode_frame(image,(rect.x(),rect.y(),rect.width(),rect.height()),state.get("max_side",960))
         except Exception as error:  # noqa: BLE001 -- граница фонового задания: ошибка передаётся в интерфейс
             state["error"] = str(error)
         finally:
             state["ready"].set()
 
-    def get(self):
+    def get(self, max_side=960):
         from PySide6.QtCore import QThread
-        state={"ready":threading.Event()}
+        state={"ready":threading.Event(), "max_side":max_side}
         if QThread.currentThread() == self.thread():
             self._capture(state)
         else:

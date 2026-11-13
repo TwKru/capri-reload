@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from capri.ai.persona import personality_file as user_persona
 from capri.automation.agent_input import PointerTools
+from capri.automation.computer_use import ComputerUseRunner
 from capri.automation.desktop_agent import TaskRunner
 from capri.core import cancellation
 from capri.desktop.screen_capture import ScreenFrames, WatchGate
@@ -20,6 +21,7 @@ class RuntimeServices(QObject):
     changed = Signal()
     desktop_command = Signal(str)
     open_requested = Signal()
+    restart_requested = Signal()
 
     def __init__(self, capri, avatar, base):
         super().__init__(avatar)
@@ -37,6 +39,7 @@ class RuntimeServices(QObject):
         self.runner = TaskRunner(self.store,self.files,self.frames,self.client,capri.actions,self.pointer,
             vision_enabled=lambda:bool(capri.cfg.get("agent_screen",False)),changed=self.changed.emit,
             plan_enabled=lambda:bool(capri.cfg.get("plan_tasks",False)))
+        self.computer_runner = ComputerUseRunner(self.store,self.frames,self.pointer,capri.cfg,self.changed.emit)
         self.desktop_command.connect(self.desktop)
         self.open_requested.connect(self.show)
         self.changed.connect(self.sync)
@@ -121,7 +124,12 @@ class RuntimeServices(QObject):
         self.processing.set()
         try:
             if job[0] == "task":
-                self.runner.run(job[1])
+                self.runner_for(job[1]).run(job[1])
+                row = self.store.get(job[1])
+                if row.get("engine") == "computer_use":
+                    self.capri.summon.emit()
+                    self.capri.subtitle.emit(row["result"] or "Задание Computer Use завершено.")
+                    self.capri.mode.emit("idle",0.)
                 return
             frame = self.frames.get()
             if job[0] == "watch" and not self.capri.cfg.get("screen_watch",False):
@@ -148,6 +156,14 @@ class RuntimeServices(QObject):
             self.changed.emit()
 
     def command(self, text):
+        computer = re.fullmatch(r"(?:управляй компьютером|управляй пк|сделай на компьютере|computer[ _]use)\s*[:—-]?\s+(.+)",
+                                text,re.IGNORECASE | re.DOTALL)
+        if computer:
+            ident = self.store.create(computer[1],engine="computer_use")
+            self.capri.subtitle.emit(f"Computer Use: задание #{ident} добавлено. Escape или «Капри, стоп» — остановить.")
+            self.capri.mode.emit("idle",0.)
+            self.changed.emit()
+            return True
         task = re.fullmatch(r"(?:выполни|начни|создай)\s+(?:задачу|задание)\s*[:—-]?\s*(.+)",text,re.IGNORECASE | re.DOTALL)
         if task:
             ident = self.store.create(task[1])
@@ -169,6 +185,9 @@ class RuntimeServices(QObject):
                 return True
         return False
 
+    def runner_for(self, ident):
+        return self.computer_runner if self.store.get(ident).get("engine") == "computer_use" else self.runner
+
     def desktop(self, action):
         {"perch":self.life.hop_window,"cursor":self.life.ride_cursor,"detach":self.life.detach}[action]()
 
@@ -179,6 +198,9 @@ class RuntimeServices(QObject):
         self.window.show()
         self.window.raise_()
         self.window.activateWindow()
+
+    def request_restart(self):
+        self.restart_requested.emit()
 
     def close(self):
         self.capri.speaker.stop()

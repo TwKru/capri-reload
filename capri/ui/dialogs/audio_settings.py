@@ -59,7 +59,7 @@ class SoundDialog(QDialog):
         self.pitch = _slider(-20, 60, round(float(cfg.get("voice_shift", 0)) * 10))
         self.pitch.setToolTip("0 — исходная высота. Больше — голос писклявее. Единица — полутон.")
         self.glitch = _slider(0, 100, round(float(cfg.get("voice_glitch", 0)) * 100))
-        self.glitch.setToolTip("Вероятность короткого повтора в реплике. 0 — без заиканий.")
+        self.glitch.setToolTip("Громкость дублирующего голоса с задержкой 1,5 мс. 0 — без дубля.")
         self.gain = _slider(50, 400, int(float(cfg.get("mic_gain", 1.0)) * 100))
         self.sens = _slider(0, 100, int(cfg.get("mic_sensitivity", 100)))
         self.vol_label, self.gain_label, self.sens_label, self.fx_label = QLabel(), QLabel(), QLabel(), QLabel()
@@ -74,12 +74,17 @@ class SoundDialog(QDialog):
         lay.addWidget(self._title("Голос Капри"))
         if cfg.get("tts_engine") == "silero":
             lay.addWidget(QLabel("Silero TTS v5 · " + cfg.get("silero_voice","baya") + " · голос работает офлайн"))
+        elif cfg.get("tts_engine") == "colab":
+            lay.addWidget(QLabel("Colab · Qwen3-TTS · GPU"))
         elif cfg.get("tts_engine") == "qwen_clone":
-            lay.addWidget(QLabel("Голос по вашим записям · обработка B · офлайн"))
+            device = getattr(capri.speaker.qwen,"device","cpu")
+            preset = getattr(capri.speaker.qwen,"voice_preset","default")
+            title = "Capri 2" if preset == "capri2" else "обработка B" if preset == "default" else preset
+            lay.addWidget(QLabel("Голос по образцу · "+title+" · офлайн · "+("NVIDIA CUDA" if device == "cuda" else "CPU")))
         lay.addLayout(self._row("Громкость:", self.volume, self.vol_label))
         lay.addLayout(self._row("Эффекты:", self.fx, self.fx_label))
         lay.addLayout(self._row("Высота голоса:", self.pitch, self.pitch_label))
-        lay.addLayout(self._row("Глитчи:", self.glitch, self.glitch_label))
+        lay.addLayout(self._row("Дубль голоса:", self.glitch, self.glitch_label))
         lay.addWidget(test, alignment=Qt.AlignmentFlag.AlignLeft)
         lay.addSpacing(10)
         lay.addWidget(self._title("Микрофон для Капри — " + (capri.current_mic() or "по умолчанию")))
@@ -87,7 +92,7 @@ class SoundDialog(QDialog):
         lay.addLayout(self._row("Чувствительность:", self.sens, self.sens_label))
         lay.addWidget(self.meter)
         hint = QLabel("Высота — насколько голос писклявый; эффекты — цифровой хор.\n"
-                      "Глитчи — отдельные короткие заикания; 0 отключает их.\n"
+                      "Дубль голоса — непрерывная копия с задержкой 1,5 мс; 0 отключает её.\n"
                       "Нажми «Проверить голос», чтобы послушать.\n"
                       "Скажи что-нибудь: полоска должна заходить за розовую отметку и становиться зелёной.\n"
                       "Не слышит — прибавь громкость. Реагирует на шум — убавь чувствительность.\n"

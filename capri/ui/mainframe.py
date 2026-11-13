@@ -69,6 +69,7 @@ class Mainframe(CyberDialog):
         self.status = QLabel("Локальные настройки · экран по запросу · Escape останавливает агента")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        layout.addWidget(self.button("Перезапустить Капри",self.runtime.request_restart))
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(STYLE)
         layout.addWidget(self.tabs)
@@ -147,6 +148,21 @@ class Mainframe(CyberDialog):
 
     def tasks_tab(self):
         form = self.page("Задания")
+        self.task_engine = QComboBox()
+        self.task_engine.addItem("Обычный агент — текущая нейросеть", "default")
+        self.task_engine.addItem("Computer Use — OpenAI, управление по снимкам экрана", "computer_use")
+        form.addRow("Исполнитель:",self.task_engine)
+        self.computer_key = QLineEdit(self.capri.cfg.get("openai_api_key",""))
+        self.computer_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.computer_key.setPlaceholderText("Ключ OpenAI или OPENAI_API_KEY")
+        self.computer_model = QLineEdit(self.capri.cfg.get("computer_use_model","gpt-6.1-sol"))
+        form.addRow("Ключ OpenAI для Computer Use:",self.computer_key)
+        form.addRow("Модель Computer Use:",self.computer_model)
+        form.addRow(self.button("Сохранить настройки Computer Use",self.save_computer_settings))
+        hint = QLabel("Computer Use работает на главном мониторе и передаёт его снимки в OpenAI API во время задания. "
+                      "Команда: «Капри, управляй компьютером: открой Блокнот и введи привет». Escape или «Капри, стоп» останавливает выполнение.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
         self.request = QPlainTextEdit()
         self.request.setPlaceholderText("Опиши результат. Например: прочитай выбранный файл и исправь опечатки.")
         self.request.setMaximumHeight(105)
@@ -189,9 +205,17 @@ class Mainframe(CyberDialog):
 
     def add_task(self):
         self.runtime.store.create(self.request.toPlainText(),due=self.when.dateTime().toSecsSinceEpoch(),
-            repeat=self.repeat.currentData(),max_steps=self.steps.value(),seconds=self.minutes.value()*60)
+            repeat=self.repeat.currentData(),max_steps=self.steps.value(),seconds=self.minutes.value()*60,
+            engine=self.task_engine.currentData())
         self.request.clear()
         self.refresh_tasks()
+
+    def save_computer_settings(self):
+        model = self.computer_model.text().strip()
+        if not model:
+            raise ValueError("Укажи модель с поддержкой Computer Use")
+        self.runtime.save({"openai_api_key":self.computer_key.text().strip(),"computer_use_model":model})
+        self.status.setText("Настройки Computer Use сохранены")
 
     def resume_task(self):
         ident = self.selected_task()
@@ -220,13 +244,14 @@ class Mainframe(CyberDialog):
 
     def approve_task(self):
         ident = self.selected_task()
-        pending = self.runtime.runner.pending.get(ident)
+        runner = self.runtime.runner_for(ident)
+        pending = runner.pending.get(ident)
         if not pending or self.runtime.store.get(ident)["status"] != "awaiting_confirmation":
             raise ValueError("Нет заблокированного шага для разрешения")
         preview = json.dumps(pending[0],ensure_ascii=False,indent=2)
         if CyberMessageBox.question(self,"Разрешить один шаг?",preview,
             CyberMessageBox.StandardButton.Yes | CyberMessageBox.StandardButton.No) == CyberMessageBox.StandardButton.Yes:
-            self.runtime.runner.approve(ident)
+            runner.approve(ident)
         self.refresh_tasks()
 
     def refresh_tasks(self):
@@ -256,8 +281,9 @@ class Mainframe(CyberDialog):
         ident = self.selected_task()
         row = self.runtime.store.get(ident)
         lines = [time.strftime("%d.%m %H:%M:%S",time.localtime(item["at"]))+"  "+item["text"] for item in self.runtime.store.log(ident)]
-        if ident in self.runtime.runner.pending:
-            lines.append(json.dumps(self.runtime.runner.pending[ident][0],ensure_ascii=False,indent=2))
+        runner = self.runtime.runner_for(ident)
+        if ident in runner.pending:
+            lines.append(json.dumps(runner.pending[ident][0],ensure_ascii=False,indent=2))
         self.log.setPlainText("\n".join(lines)+"\n"+row["result"])
 
     def files_tab(self):

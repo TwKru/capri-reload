@@ -36,8 +36,12 @@ DARK = QColor(10, 6, 18)
 W, H = 340, 500        # фигура и панель диалога; всё управление находится в меню
 FIG_H = 380            # высота области фигуры, ниже — HUD с субтитрами
 HUD_H = 120
+SUBTITLE_CPS = 45.0
 APPEAR_FRAMES = 30
 VANISH_FRAMES = 16
+POSE_INTERVAL = 10.0
+POSE_CHANCE = 0.30
+POSE_DURATION = 3.0
 
 FMT = QImage.Format.Format_ARGB32_Premultiplied
 AA = QPainter.RenderHint.Antialiasing
@@ -586,7 +590,7 @@ class Avatar(QWidget):
         # Они периодически сменяют друг друга, чтобы Капри не стояла статичной картинкой.
         pose_dir = os.path.join(assets_dir, "poses")
         pose_files = []
-        for folder in (assets_dir, pose_dir):
+        for folder in (pose_dir, assets_dir):
             if not os.path.isdir(folder):
                 continue
             for name in sorted(os.listdir(folder)):
@@ -596,21 +600,25 @@ class Avatar(QWidget):
                 if low.endswith((".png", ".webp", ".jpg")) and low not in [os.path.basename(f).lower()
                                                                             for f in pose_files]:
                     pose_files.append(os.path.join(folder, name))
-        self.poses = [img for img in (load_custom(f, W, FIG_H) for f in pose_files) if img is not None]
+        loaded_poses = {}
+        for path in pose_files:
+            img = load_custom(path, W, FIG_H)
+            if img is not None:
+                loaded_poses[os.path.basename(path).lower()] = img
+        self.poses = list(loaded_poses.values())
         if self.poses:
             self.base, self.eye_pos = self.poses[0], None
         else:  # картинок нет — рисованная Капри с глазом
             self.base, self.eye_pos = build_procedural(W, FIG_H)
             self.poses = [self.base]
 
-        # поза для прогулок: capri_roam.png в assets или в poses
-        self.roam_img = None
-        for path in (os.path.join(assets_dir, "capri_roam.png"), os.path.join(pose_dir, "capri_roam.png")):
-            if os.path.exists(path):
-                self.roam_img = load_custom(path, W, FIG_H)
-                break
+        # Именованные позы используют те же изображения, что и случайный выбор.
+        self.roam_img = loaded_poses.get("capri_roam.png")
+        self.answer_img = loaded_poses.get("capri_answer.png")
         self.pose_idx = 0
-        self.next_pose = 0.0
+        self.next_pose = time.monotonic() + POSE_INTERVAL
+        self.pose_override = None
+        self.pose_until = 0.0
         self.roaming = False
         self.roam_x = 0.0
         self.roam_dir = -1
@@ -659,6 +667,18 @@ class Avatar(QWidget):
         self.hide_at = 0.0
         self.hide_after = 12.0
         self.subtitle = ""
+        self._answer_text = ""
+        self._answer_shown = 0
+        self._answer_started = False
+        self._typing = False
+        self._typing_last = time.monotonic()
+        self._typing_credit = 0.0
+        self.speech_active = None
+        self._dialogue_width, self._dialogue_height = W, H
+        self._dialogue_scroll = 0.0
+        self._dialogue_scroll_max = 0.0
+        self._dialogue_follow = True
+        self._dialogue_size_key = None
         self.dialogue_request = ""
         self.dialogue_until = 0.0
         self._subtitle_key = None
@@ -818,19 +838,31 @@ class Avatar(QWidget):
         if len(self.poses) < 2:
             return
         if idx is None:
-            idx = random.choice([i for i in range(len(self.poses)) if i != self.pose_idx])
+            current = self._figure()
+            choices = [i for i, img in enumerate(self.poses) if img != current]
+            if not choices:
+                return
+            idx = random.choice(choices)
         self.pose_idx = idx
-        self.base = self.poses[idx]
+        self.pose_override = self.poses[idx]
+        self.pose_until = time.monotonic() + POSE_DURATION
         self.burst, self.burst_level = random.randint(5, 9), 1.0
-        self.next_pose = time.time() + random.uniform(12, 30)
+
+    def _pose_step(self, now=None):
+        """Одна попытка каждые 10 секунд независимо от речи, полёта и анимаций."""
+        now = time.monotonic() if now is None else now
+        if self.pose_override is not None and now >= self.pose_until:
+            self.pose_override = None
+        if now >= self.next_pose:
+            self.next_pose = now + POSE_INTERVAL
+            if random.random() < POSE_CHANCE:
+                self.change_pose()
 
     def summon(self):
         self.wake_up()
         self.timer.start(33)
         self.stop_roam()
         if self.state not in ("visible", "appearing"):
-            if len(self.poses) > 1:
-                self.change_pose(random.randrange(len(self.poses)))
             if not self.user_moved:
                 self.move_to_named("bottom-left")
             self.next_spin = time.time() + random.uniform(25, 60)
@@ -874,6 +906,24 @@ class Avatar(QWidget):
             self.lag = self.burst = 0
 
     def set_mode(self, mode, seconds=0.0):
+        previous = self.mode
+        if mode == "thinking" and previous != "thinking":
+            self._answer_started = self._typing = False
+            self._answer_text = ""
+            self._answer_shown = 0
+            self._dialogue_follow = True
+            self._dialogue_scroll = 0.0
+            if not self.subtitle.startswith("> "):
+                self.subtitle = ""
+        elif mode == "speaking" and previous != "speaking":
+            self._answer_started = True
+            self._answer_text = self.subtitle if not self.subtitle.startswith("> ") else ""
+            self._answer_shown = 0
+            self._typing = bool(self._answer_text)
+            self._typing_last = time.monotonic()
+            self._typing_credit = 0.0
+            self._dialogue_follow = True
+            self._dialogue_scroll = 0.0
         if self.mode == "speaking" and mode != "speaking":
             self.dialogue_until = time.monotonic()+5.
         if mode == "thinking":
@@ -892,12 +942,37 @@ class Avatar(QWidget):
         if self.hide_at:
             self.hide_at = max(self.hide_at,time.time()+max(0,self.dialogue_until-time.monotonic()))
         self.burst, self.burst_level = random.randint(3, 6), random.uniform(.4, .9)
+        self._resize_dialogue()
 
     def set_voice_paused(self, paused):
         self.voice_paused = paused
 
     def set_subtitle(self, text):
-        self.subtitle = text or ""
+        value = text or ""
+        old = self.subtitle
+        self.subtitle = value
+        if not value or value.startswith("> "):
+            self._typing = self._answer_started = False
+            self._answer_text = ""
+            self._answer_shown = 0
+            self._dialogue_scroll = 0.0
+            self._dialogue_follow = True
+        elif self.mode == "speaking" and self._answer_started and value != old:
+            # Локальная модель озвучивает предложения отдельно, а затем присылает полный ответ.
+            if " ".join(value.split()) == " ".join(self._answer_text.split()):
+                pass
+            elif value.startswith(self._answer_text):
+                self._answer_text = value
+            elif not self._answer_text.endswith(value):
+                self._answer_text = (self._answer_text.rstrip() + " " + value).lstrip()
+            self._typing = self._answer_shown < len(self._answer_text)
+            self._typing_last = time.monotonic()
+        elif self.mode != "speaking" and value != old:
+            self._typing = self._answer_started = False
+            self._answer_text = value
+            self._answer_shown = len(value)
+            self._dialogue_follow = True
+            self._dialogue_scroll = 0.0
         if not self.subtitle:
             self.dialogue_until = 0.
         if self.subtitle.startswith("> "):
@@ -905,7 +980,82 @@ class Avatar(QWidget):
 
     def dialogue_visible(self, now=None):
         now = time.monotonic() if now is None else now
-        return self.mode in ("listening", "thinking", "speaking") or (self.mode == "idle" and now < self.dialogue_until)
+        return self.mode in ("listening", "thinking", "speaking") or (self.mode == "idle" and (self._typing or now < self.dialogue_until))
+
+    def _dialogue_value(self):
+        if self.mode == "thinking":
+            return "Думаю…"
+        if self._answer_started:
+            shown = self._answer_text[:self._answer_shown]
+            if self.mode == "speaking" and self.speech_active is not None and not self.speech_active():
+                return (shown.rstrip()+"\n\n" if shown else "")+"Думаю…"
+            return shown
+        if not self.subtitle or self.subtitle.startswith("> "):
+            return ("Прослушивание выключено." if self.voice_paused else
+                    "Думаю…" if self.mode == "thinking" else "Слушаю…" if self.mode == "listening" else "Я рядом.")
+        return self.subtitle
+
+    def _advance_subtitle(self, now=None):
+        now = time.monotonic() if now is None else now
+        elapsed = max(0.0, now-self._typing_last)
+        self._typing_last = now
+        if not self._typing:
+            return
+        if self.mode == "speaking" and self.speech_active is not None and not self.speech_active():
+            return  # Пока голос синтезируется, текст ещё не опережает воспроизведение.
+        self._typing_credit += elapsed*SUBTITLE_CPS
+        count = int(self._typing_credit)
+        if not count:
+            return
+        self._typing_credit -= count
+        self._answer_shown = min(len(self._answer_text),self._answer_shown+count)
+        self._typing = self._answer_shown < len(self._answer_text)
+        if not self._typing and self.mode != "speaking":
+            self.dialogue_until = now+5.
+            self.hide_at = max(self.hide_at,time.time()+5.) if self.hide_at else 0
+
+    def _layout_dialogue(self, value, width):
+        font = QFont("Consolas", 10)
+        text = QStaticText('<span style="color:#e82440; font-weight:bold">CAPRI:</span> ' + escape(value).replace("\n", "<br>"))
+        text.setTextFormat(Qt.TextFormat.RichText)
+        text.setTextWidth(width)
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        text.setTextOption(option)
+        text.prepare(QTransform(),font)
+        return font,text
+
+    def _resize_dialogue(self):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        max_width = max(W,int(area.width()/self.scale_factor)) if area else 680
+        max_height = max(H,int(area.height()/self.scale_factor)) if area else 900
+        visible = self.dialogue_visible()
+        value = self._dialogue_value() if visible else ""
+        key = visible,value,max_width,max_height,self.scale_factor,self._answer_started
+        if key == self._dialogue_size_key:
+            return
+        self._dialogue_size_key = key
+        width,height = W,H
+        if visible:
+            limit = min(680,max_width)
+            comfort = min(180,max(30,max_height-FIG_H-62))
+            _,text = self._layout_dialogue(value,width-54)
+            while text.size().height() > comfort and width < limit:
+                width = min(limit,width+40)
+                _,text = self._layout_dialogue(value,width-54)
+            height = min(max_height,max(H,math.ceil(FIG_H+text.size().height()+62)))
+            # Во время печати окно только растёт; схлопывается при смене запроса/скрытии.
+            if self._answer_started:
+                width = min(max_width,max(width,self._dialogue_width))
+                height = min(max_height,max(height,self._dialogue_height))
+        if (width,height) != (self._dialogue_width,self._dialogue_height):
+            self._dialogue_width,self._dialogue_height = width,height
+            self.frame = canvas(width,height)
+            self.setFixedSize(round(width*self.scale_factor),round(height*self.scale_factor))
+            if area:
+                self.move(max(area.left(),min(self.x(),area.right()-self.width()+1)),
+                          max(area.top(),min(self.y(),area.bottom()-self.height()+1)))
 
     def seat_anchor(self):
         return self._seat_anchor*self.scale_factor
@@ -928,6 +1078,8 @@ class Avatar(QWidget):
         self.t += 1
         self.k += interval / 33
         now = time.time()
+        self._advance_subtitle()
+        self._pose_step()
         if self.state == "appearing" and self.k >= APPEAR_FRAMES:
             self.state, self.k = "visible", 0
         elif self.state == "vanishing" and self.k >= VANISH_FRAMES:
@@ -960,14 +1112,11 @@ class Avatar(QWidget):
               not self.desktop_controlled() and "spin" in self.anims and now >= self.next_spin):
             self.play_anim("spin")
             self.next_spin = now + random.uniform(25, 60)
-        elif (self.state == "visible" and self.next_pose and now > self.next_pose and self.anim is None
-              and self.mode not in ("idle", "listening", "thinking") and not self.sleeping):
-            self.change_pose()
-        elif self.state == "visible" and self.hide_at and now > self.hide_at and not self.editing_request:
+        elif self.state == "visible" and self.hide_at and now > self.hide_at and not self.editing_request and not self._typing:
             self.vanish()
 
         # «лаг»: кадр замирает на несколько тиков
-        smooth = self.desktop_controlled() or self.roaming or self.roam_img is not None or self.anim == "spin"
+        smooth = self._typing or self.desktop_controlled() or self.roaming or self.roam_img is not None or self.anim == "spin"
         if not smooth and self.lag > 0 and self.state != "vanishing":
             self.lag -= 1
             return
@@ -982,10 +1131,17 @@ class Avatar(QWidget):
         area = screen.availableGeometry() if screen else None
         fit = min(area.width()/W,area.height()/H) if area else 1.6
         self.scale_factor = max(.35, min(1.6, float(factor), fit))
-        self.setFixedSize(round(W*self.scale_factor), round(H*self.scale_factor))
+        self.setFixedSize(round(self._dialogue_width*self.scale_factor), round(self._dialogue_height*self.scale_factor))
+        self._resize_dialogue()
         self.update()
 
     def _figure(self):
+        if self.pose_override is not None and time.monotonic() < self.pose_until:
+            return self.pose_override
+        if self.roaming:
+            return self.roam_img if self.roam_img is not None else self.base
+        if self.mode == "speaking" and self.answer_img is not None:
+            return self.answer_img
         if self.hanging and "desktop_drag" in self.anims:
             frames = self.anims["desktop_drag"]
             return frames[int(time.time()*frames.fps) % len(frames)]
@@ -1007,16 +1163,12 @@ class Avatar(QWidget):
         if self._press is not None and self._moved and "desktop_drag" in self.anims:
             frames = self.anims["desktop_drag"]
             return frames[int((time.time() - self._drag_started) * frames.fps) % len(frames)]
-        if self.roaming:
-            return self.roam_img if self.roam_img is not None else self.base
         if self.anim:
             frames = self.anims[self.anim]
             idx = int((time.time() - self.anim_start) * getattr(frames, "fps", ANIM_FPS))
             if idx < len(frames) or self.anim_loop:
                 return frames[idx % len(frames)]
             self.anim = None
-        if self.roaming and self.roam_img is not None:
-            return self.roam_img
         if self.mode in ("idle", "listening") and self.roam_img is not None:
             # Исходная лежачая поза; ожидание не включает режим сна.
             return self.roam_img
@@ -1064,6 +1216,7 @@ class Avatar(QWidget):
         return fig
 
     def render(self):
+        self._resize_dialogue()
         f = self.frame
         f.fill(Qt.GlobalColor.transparent)
         p = QPainter(f)
@@ -1188,11 +1341,12 @@ class Avatar(QWidget):
         # PolyForm Noncommercial 1.0.0: third_party/LICENSE-CAPRI-DESKTOP.md.
         # Сохраняем прежнюю область HUD: на прогулке сверху, обычно под фигурой.
         top = FIG_H + 6
-        bottom = top + HUD_H - 12
+        panel_width = self._dialogue_width
+        bottom = self._dialogue_height - 6
         panel_top = top + 8
         points = [QPointF(16, panel_top)]
         points += [QPointF(94, panel_top), QPointF(88, top - 4), QPointF(110, panel_top)]
-        points += [QPointF(W - 8, panel_top), QPointF(W - 8, bottom)]
+        points += [QPointF(panel_width - 8, panel_top), QPointF(panel_width - 8, bottom)]
         points += [QPointF(16, bottom), QPointF(8, bottom - 8), QPointF(8, panel_top + 8)]
         outline = QPolygonF(points)
         panel = QPainterPath()
@@ -1206,7 +1360,7 @@ class Avatar(QWidget):
         p.setClipPath(panel)
         p.setPen(QPen(QColor(255, 255, 255, 9), 1))
         for row in range(panel_top, bottom, 3):
-            p.drawLine(8, row, W - 8, row)
+            p.drawLine(8, row, panel_width - 8, row)
         p.setClipping(False)
         p.setPen(QPen(QColor(58, 214, 235), 2))
         p.drawPath(panel)
@@ -1217,23 +1371,27 @@ class Avatar(QWidget):
         p.setFont(prompt_font)
         p.setPen(QColor(122, 128, 138))
         prompt = "> ты: " + (self.dialogue_request or "…")
-        prompt = p.fontMetrics().elidedText(prompt.replace("\n", " ")[:4096], Qt.TextElideMode.ElideRight, W - 54)
-        p.drawText(QRectF(30, panel_top + 7, W - 54, 19), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, prompt)
+        prompt = p.fontMetrics().elidedText(prompt.replace("\n", " ")[:4096], Qt.TextElideMode.ElideRight, panel_width - 54)
+        p.drawText(QRectF(30, panel_top + 7, panel_width - 54, 19), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, prompt)
 
-        rect = QRectF(30, panel_top + 28, W - 54, bottom - panel_top - 35)
+        rect = QRectF(30, panel_top + 28, panel_width - 54, bottom - panel_top - 35)
         font, text = self._prepare_subtitle(rect, dialogue=True)
         p.setFont(font)
         p.setPen(QColor(56, 176, 255))
-        p.drawStaticText(rect.topLeft(), text)
+        self._dialogue_scroll_max = max(0.,text.size().height()-rect.height())
+        self._dialogue_scroll = self._dialogue_scroll_max if self._dialogue_follow else min(self._dialogue_scroll,self._dialogue_scroll_max)
+        p.setClipRect(rect)
+        p.drawStaticText(rect.topLeft()-QPointF(0,self._dialogue_scroll), text)
         p.restore()
 
     def _prepare_subtitle(self, rect, dialogue=False):
-        value = self.subtitle
-        if dialogue and (not value or value.startswith("> ")):
-            value = ("Прослушивание выключено." if self.voice_paused else
-                     "Думаю…" if self.mode == "thinking" else "Слушаю…" if self.mode == "listening" else "Я рядом.")
+        value = self._dialogue_value() if dialogue else self.subtitle
         key = value, rect.width(), rect.height(), DPR, dialogue
         if key == self._subtitle_key:
+            return self._subtitle_static
+        if dialogue:
+            self._subtitle_key = key
+            self._subtitle_static = self._layout_dialogue(value,rect.width())
             return self._subtitle_static
         # Текст ИИ может быть длинным: полный ответ остаётся в subtitle, ограничен только видимый фрагмент.
         full = value[:4096]
@@ -1272,6 +1430,16 @@ class Avatar(QWidget):
         p.scale(self.scale_factor, self.scale_factor)
         p.drawImage(0, 0, self.frame)
         p.end()
+
+    def wheelEvent(self, event):
+        if self.dialogue_visible() and event.position().y()/self.scale_factor >= FIG_H:
+            self._dialogue_scroll = max(0.,min(self._dialogue_scroll_max,self._dialogue_scroll-event.angleDelta().y()/120*45))
+            self._dialogue_follow = self._dialogue_scroll >= self._dialogue_scroll_max
+            self.render()
+            self.update()
+            event.accept()
+        else:
+            event.ignore()
 
     # ---------- мышь: клик — позвать, тащить — переместить; ПКМ отключён ----------
     def mousePressEvent(self, e):

@@ -119,7 +119,7 @@ class ListeningTests(unittest.TestCase):
 
     def setUp(self):
         cfg = copy.deepcopy(main.DEFAULTS)
-        cfg.update(local_ai=False, use_google_stt=False, intent_router=False, speak_wake_ack=True)
+        cfg.update(local_ai=False, use_google_stt=False, intent_router=False, speak_wake_ack=True, voice_requires_name=False)
         with patch.object(main, "Actions"), patch.object(main, "Speaker"), \
                 patch.object(main, "AI"), patch.object(main, "make_glitch_sound"):
             self.capri = main.Capri(cfg)
@@ -282,7 +282,7 @@ class ListeningTests(unittest.TestCase):
         self.capri.actions.handle.assert_not_called()
 
     def test_wake_is_silent_by_default_and_still_listens_for_command(self):
-        self.assertFalse(main.DEFAULTS['speak_wake_ack'])
+        self.assertTrue(main.DEFAULTS['speak_wake_ack'])
         self.capri.cfg['speak_wake_ack'] = False
         subtitles = []
         self.capri.subtitle.connect(subtitles.append)
